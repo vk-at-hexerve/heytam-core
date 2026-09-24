@@ -18,9 +18,13 @@ spec:
         {{- include "multi-agent-suite.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: heytam
       annotations:
+        # Observability
         prometheus.io/scrape: "true"
         prometheus.io/port: "{{ .Values.agents.heytam.port }}"
         prometheus.io/path: "/metrics"
+        # Security & mTLS (HIPAA Compliance)
+        sidecar.istio.io/inject: "true"
+        linkerd.io/inject: "enabled"
     spec:
       containers:
         - name: heytam

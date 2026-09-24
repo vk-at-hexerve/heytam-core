@@ -18,11 +18,14 @@ spec:
         {{- include "multi-agent-suite.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: calling-agent
       annotations:
+        # Observability
         prometheus.io/scrape: "true"
         prometheus.io/port: "{{ .Values.agents.calling.port }}"
         prometheus.io/path: "/metrics"
+        # Security & mTLS (HIPAA Compliance)
+        sidecar.istio.io/inject: "true"
+        linkerd.io/inject: "enabled"
       {{- if .Values.secrets.useAzureKeyVault }}
-      annotations:
         secrets-store-csi-driver.sigs.k8s.io/used: "true"
       {{- end }}
     spec:

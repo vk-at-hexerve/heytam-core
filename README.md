@@ -64,6 +64,7 @@ For detailed information on configuring, expanding, or deploying the system, ple
 - [Adding New Agents](docs/adding-new-agents.md)
 - [Production Deployment (AKS)](docs/deployment.md)
 - [Observability & Metrics](docs/observability.md)
+- [HIPAA Compliance & Data Security](docs/hipaa-compliance.md)
 
 ## 🛠️ Technology Stack
 - **Language:** TypeScript (Strict Mode)
