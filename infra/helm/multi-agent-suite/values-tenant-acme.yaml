@@ -1,0 +1,47 @@
+# Helm overlay for deploying the Acme Corp tenant namespace
+global:
+  clientId: "acme"
+  environment: "production"
+
+# In a real environment, secrets would be deployed out-of-band via SecretProviderClass or pre-created secrets,
+# but if you're not using Azure KV, you can deploy dummy ones or manage them securely.
+secrets:
+  useAzureKeyVault: false
+
+# Example: In Acme namespace, we enable HeyTam, Calling, and Mail, but we disable Marketing.
+agents:
+  heytam:
+    enabled: true
+    replicaCount: 1
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 3
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "512Mi"
+      limits:
+        cpu: "1000m"
+        memory: "1Gi"
+
+  calling:
+    enabled: true
+    replicaCount: 2
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 10
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "512Mi"
+
+  mail:
+    enabled: true
+    replicaCount: 1
+    autoscaling:
+      enabled: false
+
+  marketing:
+    enabled: false # Acme doesn't use the Marketing agent

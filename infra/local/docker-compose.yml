@@ -1,0 +1,129 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: local-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: heytam
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - agent_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: local-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - agent_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  heytam:
+    build:
+      context: ../../
+      dockerfile: infra/docker/Dockerfile.agent
+      target: heytam
+    container_name: local-heytam
+    env_file:
+      - ../../.env.example
+      - ../../src/mastra/agents/heytam/.env.example
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/heytam
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - agent_network
+
+  calling-agent:
+    build:
+      context: ../../
+      dockerfile: infra/docker/Dockerfile.agent
+      target: calling-agent
+    container_name: local-calling-agent
+    env_file:
+      - ../../.env.example
+      - ../../src/mastra/agents/calling/.env.example
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/heytam
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - agent_network
+
+  mail-agent:
+    build:
+      context: ../../
+      dockerfile: infra/docker/Dockerfile.agent
+      target: mail-agent
+    container_name: local-mail-agent
+    env_file:
+      - ../../.env.example
+      - ../../src/mastra/agents/mail/.env.example
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/heytam
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - "3002:3002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - agent_network
+
+  marketing-agent:
+    build:
+      context: ../../
+      dockerfile: infra/docker/Dockerfile.agent
+      target: marketing-agent
+    container_name: local-marketing-agent
+    env_file:
+      - ../../.env.example
+      - ../../src/mastra/agents/marketing/.env.example
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/heytam
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - "3003:3003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - agent_network
+
+volumes:
+  postgres_data:
+
+networks:
+  agent_network:
+    driver: bridge

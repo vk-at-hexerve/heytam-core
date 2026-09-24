@@ -1,0 +1,19 @@
+{{- if .Values.agents.heytam.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: heytam
+  labels:
+    {{- include "multi-agent-suite.labels" . | nindent 4 }}
+    app.kubernetes.io/component: heytam
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.agents.heytam.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "multi-agent-suite.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: heytam
+{{- end }}

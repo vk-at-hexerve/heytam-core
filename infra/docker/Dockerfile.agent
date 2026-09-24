@@ -1,0 +1,95 @@
+# Multi-target Dockerfile for Multi-Agent AI System
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+
+COPY tsconfig.json ./
+COPY src ./src
+RUN npm run build
+
+# ---
+# Target: heytam (Supervisor)
+# ---
+FROM node:20-alpine AS heytam
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+COPY --from=builder /app/dist ./dist
+
+# Create unprivileged user
+RUN addgroup -g 10001 agentgroup && \
+    adduser -u 10001 -G agentgroup -s /bin/sh -D agentuser
+USER agentuser
+
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
+CMD ["node", "dist/agents/heytam.js"]
+
+# ---
+# Target: calling-agent
+# ---
+FROM node:20-alpine AS calling-agent
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+COPY --from=builder /app/dist ./dist
+
+RUN addgroup -g 10001 agentgroup && \
+    adduser -u 10001 -G agentgroup -s /bin/sh -D agentuser
+USER agentuser
+
+EXPOSE 3001
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3001/health || exit 1
+CMD ["node", "dist/agents/calling-agent.js"]
+
+# ---
+# Target: mail-agent
+# ---
+FROM node:20-alpine AS mail-agent
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+COPY --from=builder /app/dist ./dist
+
+RUN addgroup -g 10001 agentgroup && \
+    adduser -u 10001 -G agentgroup -s /bin/sh -D agentuser
+USER agentuser
+
+EXPOSE 3002
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3002/health || exit 1
+CMD ["node", "dist/agents/mail-agent.js"]
+
+# ---
+# Target: marketing-agent
+# ---
+FROM node:20-alpine AS marketing-agent
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+COPY --from=builder /app/dist ./dist
+
+RUN addgroup -g 10001 agentgroup && \
+    adduser -u 10001 -G agentgroup -s /bin/sh -D agentuser
+USER agentuser
+
+EXPOSE 3003
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3003/health || exit 1
+CMD ["node", "dist/agents/marketing-agent.js"]

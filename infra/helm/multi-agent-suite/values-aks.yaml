@@ -1,0 +1,71 @@
+global:
+  environment: "production"
+
+image:
+  # This will be replaced during CI/CD or by the deploy script
+  repository: "REPLACE_WITH_ACR_SERVER/multi-agent"
+  pullPolicy: Always
+
+secrets:
+  useAzureKeyVault: true
+  # keyVaultName and tenantId must be provided during deployment
+  keyVaultName: "REPLACE_WITH_KV_NAME"
+  tenantId: "REPLACE_WITH_TENANT_ID"
+
+networkPolicy:
+  enabled: true
+
+# Disable local dependencies in favor of Azure Managed Services
+localPostgres:
+  enabled: false
+localRedis:
+  enabled: false
+
+ingress:
+  enabled: true
+  className: "nginx" # Or application-gateway if using AGIC
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  hosts:
+    - host: api.heytam.example.com
+      paths:
+        - path: /heytam
+          pathType: Prefix
+          service: heytam
+        - path: /calling
+          pathType: Prefix
+          service: calling-agent
+        - path: /mail
+          pathType: Prefix
+          service: mail-agent
+        - path: /marketing
+          pathType: Prefix
+          service: marketing-agent
+  tls:
+    - secretName: heytam-tls
+      hosts:
+        - api.heytam.example.com
+
+# Enable autoscaling for production
+agents:
+  heytam:
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 10
+  calling:
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 10
+  mail:
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 10
+  marketing:
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 10

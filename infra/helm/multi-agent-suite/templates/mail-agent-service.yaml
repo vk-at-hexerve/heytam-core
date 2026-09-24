@@ -1,0 +1,19 @@
+{{- if .Values.agents.mail.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: mail-agent
+  labels:
+    {{- include "multi-agent-suite.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mail-agent
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.agents.mail.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "multi-agent-suite.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: mail-agent
+{{- end }}

@@ -1,0 +1,19 @@
+{{- if .Values.agents.marketing.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: marketing-agent
+  labels:
+    {{- include "multi-agent-suite.labels" . | nindent 4 }}
+    app.kubernetes.io/component: marketing-agent
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.agents.marketing.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "multi-agent-suite.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: marketing-agent
+{{- end }}

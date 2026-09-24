@@ -1,0 +1,110 @@
+global:
+  clientId: "demo" # Client identifier determining namespace and resource prefixes
+  environment: "development" # development, staging, production
+
+image:
+  repository: "multi-agent"
+  pullPolicy: IfNotPresent
+  tag: "latest"
+  # Set to azure acr login server for AKS (e.g. myacr.azurecr.io/multi-agent)
+
+secrets:
+  useAzureKeyVault: false
+  keyVaultName: ""
+  tenantId: ""
+
+networkPolicy:
+  enabled: true
+
+# Ingress configuration
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  hosts:
+    - host: chart-example.local
+      paths:
+        - path: /heytam
+          pathType: Prefix
+          service: heytam
+        - path: /calling
+          pathType: Prefix
+          service: calling-agent
+        - path: /mail
+          pathType: Prefix
+          service: mail-agent
+        - path: /marketing
+          pathType: Prefix
+          service: marketing-agent
+  tls: []
+
+# Common settings for all agents
+agents:
+  heytam:
+    enabled: true
+    replicaCount: 1
+    imageTarget: heytam
+    port: 3000
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    autoscaling:
+      enabled: false
+      minReplicas: 1
+      maxReplicas: 5
+      targetCPUUtilizationPercentage: 80
+
+  calling:
+    enabled: true
+    replicaCount: 1
+    imageTarget: calling
+    port: 3001
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    autoscaling:
+      enabled: false
+
+  mail:
+    enabled: true
+    replicaCount: 1
+    imageTarget: mail
+    port: 3002
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    autoscaling:
+      enabled: false
+
+  marketing:
+    enabled: true
+    replicaCount: 1
+    imageTarget: marketing
+    port: 3003
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    autoscaling:
+      enabled: false
+
+# Local dependencies (set enabled: false for AKS)
+localPostgres:
+  enabled: true
+localRedis:
+  enabled: true

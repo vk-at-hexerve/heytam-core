@@ -1,0 +1,37 @@
+global:
+  environment: "local"
+
+image:
+  repository: "multi-agent"
+  pullPolicy: Never
+  tag: "latest"
+
+secrets:
+  useAzureKeyVault: false
+
+networkPolicy:
+  enabled: true
+
+localPostgres:
+  enabled: true
+localRedis:
+  enabled: true
+
+ingress:
+  enabled: true
+  className: "nginx"
+  hosts:
+    - host: local.heytam.com
+      paths:
+        - path: /heytam
+          pathType: Prefix
+          service: heytam
+        - path: /calling
+          pathType: Prefix
+          service: calling-agent
+        - path: /mail
+          pathType: Prefix
+          service: mail-agent
+        - path: /marketing
+          pathType: Prefix
+          service: marketing-agent

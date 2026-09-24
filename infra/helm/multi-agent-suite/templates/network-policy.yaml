@@ -1,0 +1,34 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "multi-agent-suite.fullname" . }}-tenant-isolation
+  labels:
+    {{- include "multi-agent-suite.labels" . | nindent 4 }}
+spec:
+  podSelector: {} # Select all pods in this namespace
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic from within the same namespace
+    - from:
+        - podSelector: {}
+    # Allow ingress controller traffic (assuming it's in a namespace labeled ingress-nginx)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+  egress:
+    # Allow DNS resolution
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow all egress to internet for API calls (Meta, Zoho, Twilio, etc)
+    # Restrict internal IPs if strictly required, but for now allow 0.0.0.0/0
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+{{- end }}

@@ -1,0 +1,68 @@
+{{- if .Values.agents.calling.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: calling-agent
+  labels:
+    {{- include "multi-agent-suite.labels" . | nindent 4 }}
+    app.kubernetes.io/component: calling-agent
+spec:
+  replicas: {{ .Values.agents.calling.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "multi-agent-suite.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: calling-agent
+  template:
+    metadata:
+      labels:
+        {{- include "multi-agent-suite.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: calling-agent
+      {{- if .Values.secrets.useAzureKeyVault }}
+      annotations:
+        secrets-store-csi-driver.sigs.k8s.io/used: "true"
+      {{- end }}
+    spec:
+      containers:
+        - name: calling-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["node", "dist/agents/calling-agent.js"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.agents.calling.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "multi-agent-suite.fullname" . }}-config
+            - secretRef:
+                name: {{ include "multi-agent-suite.fullname" . }}-calling-secrets
+          resources:
+            {{- toYaml .Values.agents.calling.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- if .Values.secrets.useAzureKeyVault }}
+          volumeMounts:
+            - name: secrets-store-inline
+              mountPath: "/mnt/secrets-store"
+              readOnly: true
+          {{- end }}
+      {{- if .Values.secrets.useAzureKeyVault }}
+      volumes:
+        - name: secrets-store-inline
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ include "multi-agent-suite.fullname" . }}-kv
+      {{- end }}
+{{- end }}
