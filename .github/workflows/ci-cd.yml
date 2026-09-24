@@ -1,0 +1,97 @@
+name: Enterprise Multi-Agent CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  ACR_NAME: "heytamprodacr" # Should match output from Bicep
+  RESOURCE_GROUP: "heytam-prod-rg"
+  AKS_CLUSTER: "heytam-prod-aks"
+  HELM_RELEASE_NAME: "multi-agent-suite"
+
+jobs:
+  test:
+    name: Run Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Execute Tests (Vitest)
+        run: npm run test
+
+  build-and-push:
+    name: Build & Push Docker Images
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Log into Azure Container Registry
+        run: |
+          az acr login --name ${{ env.ACR_NAME }}
+
+      - name: Build and Push Microservices
+        run: |
+          ACR_URL="${{ env.ACR_NAME }}.azurecr.io"
+          TAG=${{ github.sha }}
+          
+          # Build all targets using the multi-stage Dockerfile
+          docker build -f infra/docker/Dockerfile.agent --target heytam -t $ACR_URL/heytam:$TAG .
+          docker build -f infra/docker/Dockerfile.agent --target calling-agent -t $ACR_URL/calling-agent:$TAG .
+          docker build -f infra/docker/Dockerfile.agent --target mail-agent -t $ACR_URL/mail-agent:$TAG .
+          docker build -f infra/docker/Dockerfile.agent --target marketing-agent -t $ACR_URL/marketing-agent:$TAG .
+          
+          # Push to ACR
+          docker push $ACR_URL/heytam:$TAG
+          docker push $ACR_URL/calling-agent:$TAG
+          docker push $ACR_URL/mail-agent:$TAG
+          docker push $ACR_URL/marketing-agent:$TAG
+
+  deploy-aks:
+    name: Deploy to Azure Kubernetes Service
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get AKS Credentials
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ env.RESOURCE_GROUP }}
+          cluster-name: ${{ env.AKS_CLUSTER }}
+
+      - name: Deploy via Helm
+        run: |
+          helm upgrade --install ${{ env.HELM_RELEASE_NAME }} ./infra/helm/multi-agent-suite \
+            --namespace heytam-system \
+            --create-namespace \
+            --set image.repository=${{ env.ACR_NAME }}.azurecr.io \
+            --set image.tag=${{ github.sha }} \
+            --set secrets.useAzureKeyVault=true
