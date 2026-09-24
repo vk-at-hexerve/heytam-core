@@ -17,6 +17,10 @@ spec:
       labels:
         {{- include "multi-agent-suite.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: heytam
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.agents.heytam.port }}"
+        prometheus.io/path: "/metrics"
     spec:
       containers:
         - name: heytam

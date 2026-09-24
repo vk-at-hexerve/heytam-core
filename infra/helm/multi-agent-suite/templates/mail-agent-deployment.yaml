@@ -17,6 +17,10 @@ spec:
       labels:
         {{- include "multi-agent-suite.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: mail-agent
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.agents.mail.port }}"
+        prometheus.io/path: "/metrics"
       {{- if .Values.secrets.useAzureKeyVault }}
       annotations:
         secrets-store-csi-driver.sigs.k8s.io/used: "true"

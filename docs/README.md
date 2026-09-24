@@ -18,3 +18,6 @@ Welcome to the documentation for the Enterprise Multi-Agent AI system (HeyTam Co
 
 5. **[Adding a New Agent](./adding-new-agents.md)**
    Step-by-step tutorial on how to scaffold a new slave agent, configure its environment/MCP tools, expose it as a REST microservice, and connect it to the HeyTam Orchestrator.
+
+6. **[Observability & Metrics](./observability.md)**
+   Overview of the Prometheus integration, custom agent telemetry (counters, latency histograms), and Kubernetes/Azure Monitor scraping configuration.

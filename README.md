@@ -63,6 +63,7 @@ For detailed information on configuring, expanding, or deploying the system, ple
 - [Client Onboarding & Multi-Tenancy](docs/client-onboarding.md)
 - [Adding New Agents](docs/adding-new-agents.md)
 - [Production Deployment (AKS)](docs/deployment.md)
+- [Observability & Metrics](docs/observability.md)
 
 ## 🛠️ Technology Stack
 - **Language:** TypeScript (Strict Mode)
