@@ -9,12 +9,12 @@ export const delegateToCallingAgent = createTool({
   inputSchema: z.object({
     prompt: z.string().describe('The complete instruction and context for the Calling Agent.'),
   }),
-  execute: async ({ context }) => {
+  execute: async ({ prompt }) => {
     const url = process.env.CALLING_AGENT_URL || 'http://calling-agent:3001/execute';
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: context.prompt }),
+      body: JSON.stringify({ prompt }),
     });
     const data = await response.json();
     return data;
@@ -27,12 +27,12 @@ export const delegateToMailAgent = createTool({
   inputSchema: z.object({
     prompt: z.string().describe('The complete instruction and context for the Mail Agent.'),
   }),
-  execute: async ({ context }) => {
+  execute: async ({ prompt }) => {
     const url = process.env.MAIL_AGENT_URL || 'http://mail-agent:3002/execute';
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: context.prompt }),
+      body: JSON.stringify({ prompt }),
     });
     const data = await response.json();
     return data;
@@ -45,12 +45,12 @@ export const delegateToMarketingAgent = createTool({
   inputSchema: z.object({
     prompt: z.string().describe('The complete instruction and context for the Marketing Agent.'),
   }),
-  execute: async ({ context }) => {
+  execute: async ({ prompt }) => {
     const url = process.env.MARKETING_AGENT_URL || 'http://marketing-agent:3003/execute';
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: context.prompt }),
+      body: JSON.stringify({ prompt }),
     });
     const data = await response.json();
     return data;

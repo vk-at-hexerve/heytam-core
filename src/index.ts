@@ -28,19 +28,16 @@ async function main() {
       
       // Simulate HeyTam processing the notification and delegating
       try {
-        const response = await heytamSupervisor.generate({
-          messages: [
-            {
-              role: 'system',
-              content: `A new CRM lead signal arrived from ${notification.source}. Lead Details: ${JSON.stringify(lead)}`,
-            },
-            {
-              role: 'user',
-              content: 'Please delegate this to the calling agent to initiate an outbound call immediately.',
-            }
-          ],
-          // threadId: heytamLiveOpsThread,
-        });
+        const response = await heytamSupervisor.generate([
+          {
+            role: 'system',
+            content: `A new CRM lead signal arrived from ${notification.source}. Lead Details: ${JSON.stringify(lead)}`,
+          },
+          {
+            role: 'user',
+            content: 'Please delegate this to the calling agent to initiate an outbound call immediately.',
+          }
+        ]);
 
         console.log(`\n[HeyTam] Orchestrator Response:`);
         console.log(response.text);

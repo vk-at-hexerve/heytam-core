@@ -1,5 +1,5 @@
 import { Agent } from '@mastra/core/agent';
-import { getAgentModel } from '../utils/model-provider.js';
+import { getAgentModel } from '../../utils/model-provider.js';
 import { getHeytamMcpTools } from './mcp.js';
 import { delegateToCallingAgent, delegateToMailAgent, delegateToMarketingAgent } from './remote-tools.js';
 

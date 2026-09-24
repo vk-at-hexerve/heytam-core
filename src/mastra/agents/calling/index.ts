@@ -1,5 +1,5 @@
 import { Agent } from '@mastra/core/agent';
-import { getAgentModel } from '../utils/model-provider.js';
+import { getAgentModel } from '../../utils/model-provider.js';
 import { getCallingMcpTools } from './mcp.js';
 import { initiateCallTool } from './tools.js';
 
