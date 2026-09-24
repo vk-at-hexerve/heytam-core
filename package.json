@@ -1,0 +1,32 @@
+{
+  "name": "heytam-core",
+  "version": "1.0.0",
+  "description": "Production-grade enterprise multi-agent codebase in TypeScript using Mastra AI",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node --experimental-specifier-resolution=node dist/index.js",
+    "dev": "tsc -w & node --watch --experimental-specifier-resolution=node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.122",
+    "@ai-sdk/openai": "^3.0.115",
+    "@mastra/core": "latest",
+    "@mastra/mcp": "latest",
+    "@mastra/memory": "latest",
+    "@mastra/pg": "latest",
+    "@mastra/redis": "latest",
+    "@types/node-cron": "^3.0.11",
+    "dotenv": "^16.4.5",
+    "node-cron": "^4.6.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "typescript": "^5.5.3",
+    "vite": "^8.3.0",
+    "vitest": "latest"
+  }
+}
