@@ -18,7 +18,8 @@ describe('HeyTam Orchestrator Agent', () => {
     } as any);
 
     const result = await handleSupervisorPrompt(
-      'Check the pending leads in Zoho and schedule AI calling for the top 5 urgent leads.'
+      'Check the pending leads in Zoho and schedule AI calling for the top 5 urgent leads.',
+      'tenant-acme'
     );
 
     expect(generateSpy).toHaveBeenCalledTimes(1);
@@ -26,7 +27,7 @@ describe('HeyTam Orchestrator Agent', () => {
 
     expect(generateSpy.mock.calls[0][0]).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ role: 'system' }),
+        expect.objectContaining({ role: 'system', content: expect.stringContaining('tenant-acme') }),
         expect.objectContaining({ role: 'user', content: expect.stringContaining('pending leads in Zoho') }),
       ])
     );

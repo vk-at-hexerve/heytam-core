@@ -3,6 +3,7 @@ import cron from 'node-cron';
 import client from 'prom-client';
 import { mastra } from '../mastra/index.js';
 import { handleSupervisorPrompt } from '../mastra/agents/heytam/index.js';
+import { getAllowedTenantIds, normalizeTenantId } from '../mastra/utils/tenant-access.js';
 
 // ==========================================
 // Observability & Metrics Configuration
@@ -37,6 +38,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const payload = JSON.parse(body || '{}');
         const prompt = typeof payload.prompt === 'string' ? payload.prompt : '';
+        const tenantId = normalizeTenantId(typeof payload.tenantId === 'string' ? payload.tenantId : undefined);
 
         if (!prompt.trim()) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -44,10 +46,17 @@ const server = http.createServer(async (req, res) => {
           return;
         }
 
-        const result = await handleSupervisorPrompt(prompt);
+        const allowedTenantIds = getAllowedTenantIds();
+        if (allowedTenantIds.length > 0 && !tenantId) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'tenantId is required when tenant restrictions are enabled.' }));
+          return;
+        }
+
+        const result = await handleSupervisorPrompt(prompt, tenantId);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ result }));
+        res.end(JSON.stringify({ result, tenantId }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
