@@ -18,3 +18,22 @@ export const heytamSupervisor = new Agent({
     ...heytamMcpTools,
   },
 });
+
+export async function handleSupervisorPrompt(prompt: string): Promise<string> {
+  if (!prompt || !prompt.trim()) {
+    throw new Error('Prompt is required.');
+  }
+
+  const response = await heytamSupervisor.generate([
+    {
+      role: 'system',
+      content: `You are HeyTam, the lead supervisor. Review requests, decide which specialized agent should handle the work, and produce a concise action plan. Use the available delegation tools when the task clearly maps to calling, mail, or marketing work. If the user asks for lead triage, prioritise pending leads, urgency, and agent assignment.`,
+    },
+    {
+      role: 'user',
+      content: prompt.trim(),
+    },
+  ]);
+
+  return response.text;
+}

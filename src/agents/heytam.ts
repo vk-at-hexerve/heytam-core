@@ -2,6 +2,7 @@ import http from 'http';
 import cron from 'node-cron';
 import client from 'prom-client';
 import { mastra } from '../mastra/index.js';
+import { handleSupervisorPrompt } from '../mastra/agents/heytam/index.js';
 
 // ==========================================
 // Observability & Metrics Configuration
@@ -25,6 +26,35 @@ const server = http.createServer(async (req, res) => {
   } else if (req.url === '/metrics') {
     res.writeHead(200, { 'Content-Type': register.contentType });
     res.end(await register.metrics());
+  } else if (req.url === '/api/supervisor/prompt' && req.method === 'POST') {
+    let body = '';
+
+    req.on('data', (chunk) => {
+      body += chunk.toString();
+    });
+
+    req.on('end', async () => {
+      try {
+        const payload = JSON.parse(body || '{}');
+        const prompt = typeof payload.prompt === 'string' ? payload.prompt : '';
+
+        if (!prompt.trim()) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Prompt is required.' }));
+          return;
+        }
+
+        const result = await handleSupervisorPrompt(prompt);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ result }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: error instanceof Error ? error.message : 'Unknown error',
+        }));
+      }
+    });
   } else {
     res.writeHead(404);
     res.end();
