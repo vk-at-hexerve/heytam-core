@@ -1,0 +1,126 @@
+version: '3.8'
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HeyTam AI Agent Suite — 4 Isolated Test Agent Containers + Supervisor
+# Use for local testing of:
+#  1. Calling Agent (Voice/Outbound)                  -> Port 3001
+#  2. Mailing Agent (Follow-up & Email Dispatch)      -> Port 3002
+#  3. Mail Reading Agent (Inbound Lead Concierge)     -> Port 3003
+#  4. Calendar Date Appointment Selection Agent       -> Port 3004
+#  5. HeyTam Core Supervisor & API Gateway            -> Port 4000
+# ═══════════════════════════════════════════════════════════════════════════════
+
+services:
+  # ─── 1. Calling Agent (Voice/Telephony) ──────────────────────────────────────
+  calling-agent:
+    build:
+      context: ../../
+      dockerfile: infra/docker/Dockerfile.agent
+      target: calling-agent
+    container_name: heytam-calling-agent
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+    networks:
+      - agent_network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ─── 2. Mailing Agent (Email Dispatch & Follow-up) ──────────────────────────
+  mailing-agent:
+    build:
+      context: ../../
+      dockerfile: infra/docker/Dockerfile.agent
+      target: mail-agent
+    container_name: heytam-mailing-agent
+    ports:
+      - "3002:3002"
+    environment:
+      - PORT=3002
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+    networks:
+      - agent_network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ─── 3. Mail Reading Agent (Lead Concierge & Email Parser) ───────────────────
+  mail-reading-agent:
+    build:
+      context: ../../
+      dockerfile: infra/docker/Dockerfile.agent
+      target: mail-reading-agent
+    container_name: heytam-mail-reading-agent
+    ports:
+      - "3003:3003"
+    environment:
+      - PORT=3003
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+    networks:
+      - agent_network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ─── 4. Calendar Date Appointment Selection Agent (Booking) ─────────────────
+  booking-agent:
+    build:
+      context: ../../
+      dockerfile: infra/docker/Dockerfile.agent
+      target: booking-agent
+    container_name: heytam-booking-agent
+    ports:
+      - "3004:3004"
+    environment:
+      - PORT=3004
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+    networks:
+      - agent_network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3004/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ─── 5. HeyTam Core Supervisor & Unified API Gateway ─────────────────────────
+  heytam-supervisor:
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    container_name: heytam-supervisor
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - CORS_ORIGIN=*
+    depends_on:
+      - calling-agent
+      - mailing-agent
+      - mail-reading-agent
+      - booking-agent
+    networks:
+      - agent_network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+networks:
+  agent_network:
+    driver: bridge

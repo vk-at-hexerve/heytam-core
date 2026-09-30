@@ -93,3 +93,46 @@ EXPOSE 3003
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:3003/health || exit 1
 CMD ["node", "dist/agents/marketing-agent.js"]
+
+# ---
+# Target: mail-reading-agent
+# ---
+FROM node:20-alpine AS mail-reading-agent
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+COPY --from=builder /app/dist ./dist
+
+RUN addgroup -g 10001 agentgroup && \
+    adduser -u 10001 -G agentgroup -s /bin/sh -D agentuser
+USER agentuser
+
+EXPOSE 3003
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3003/health || exit 1
+CMD ["node", "dist/agents/mail-reading-agent.js"]
+
+# ---
+# Target: booking-agent
+# ---
+FROM node:20-alpine AS booking-agent
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+COPY --from=builder /app/dist ./dist
+
+RUN addgroup -g 10001 agentgroup && \
+    adduser -u 10001 -G agentgroup -s /bin/sh -D agentuser
+USER agentuser
+
+EXPOSE 3004
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3004/health || exit 1
+CMD ["node", "dist/agents/booking-agent.js"]
+

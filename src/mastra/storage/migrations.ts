@@ -1,4 +1,5 @@
 import { Client } from 'pg';
+import type { QueryResultRow } from 'pg';
 
 const migrationSql = `
 CREATE TABLE IF NOT EXISTS mastra_memory (
@@ -29,7 +30,7 @@ export async function checkMastraPersistence(connectionString: string): Promise<
   const client = new Client({ connectionString });
   try {
     await client.connect();
-    const result = await client.query(`
+    const result = await client.query<QueryResultRow>(`
       SELECT table_name
       FROM information_schema.tables
       WHERE table_schema = 'public'
@@ -37,8 +38,8 @@ export async function checkMastraPersistence(connectionString: string): Promise<
     `);
 
     return {
-      ok: result.rowCount > 0,
-      tables: result.rows.map((row) => row.table_name),
+      ok: (result.rowCount ?? 0) > 0,
+      tables: result.rows.map((row: QueryResultRow) => row['table_name'] as string),
     };
   } finally {
     await client.end();

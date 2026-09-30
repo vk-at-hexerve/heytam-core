@@ -1,0 +1,144 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# HeyTam Core — Kubernetes Deployment
+# Unified Supervisor + 30 Slave Agent Workforce in a single pod
+# ═══════════════════════════════════════════════════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: heytam-core
+  namespace: heytam
+  labels:
+    app: heytam-core
+    version: "3.0.0"
+    role: supervisor-workforce
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: heytam-core
+  template:
+    metadata:
+      labels:
+        app: heytam-core
+        role: supervisor-workforce
+    spec:
+      containers:
+        - name: heytam-core
+          image: heytam/heytam-core:latest  # Replace with your registry/image
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 10000
+              name: http
+          env:
+            # ─── AI Backend ─────────────────────────────────────────────────
+            - name: AI_BACKEND
+              value: "OPENAI"
+            - name: OPENAI_MODEL
+              value: "gpt-4o-mini"
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: openai-api-key
+
+            # ─── Database ────────────────────────────────────────────────────
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: redis-url
+
+            # ─── Tenant Config ───────────────────────────────────────────────
+            - name: ALLOWED_TENANTS
+              valueFrom:
+                configMapKeyRef:
+                  name: heytam-config
+                  key: allowed-tenants
+
+            # ─── Server ─────────────────────────────────────────────────────
+            - name: PORT
+              value: "10000"
+            - name: NODE_ENV
+              value: "production"
+            - name: CORS_ORIGIN
+              valueFrom:
+                configMapKeyRef:
+                  name: heytam-config
+                  key: cors-origin
+
+          # ─── Kubernetes Health Probes ─────────────────────────────────────
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 10000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 10000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# Service — Internal cluster DNS + external LoadBalancer
+# ═══════════════════════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: Service
+metadata:
+  name: heytam-core
+  namespace: heytam
+  labels:
+    app: heytam-core
+spec:
+  selector:
+    app: heytam-core
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 10000
+  type: ClusterIP  # Change to LoadBalancer for external access
+
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# ConfigMap — Non-sensitive configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: heytam-config
+  namespace: heytam
+data:
+  allowed-tenants: "tenant-acme,tenant-globex,tenant-demo"
+  cors-origin: "*"
+
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# Namespace
+# ═══════════════════════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: heytam
+  labels:
+    name: heytam
