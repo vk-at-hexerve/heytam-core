@@ -20,8 +20,8 @@ export function assertTenantAccess(tenantId: string): void {
     throw new Error('Tenant ID is required.');
   }
 
-  // Grant access for all registered businesses (biz_*), tenant-* IDs, or wildcards
-  if (normalizedTenantId.startsWith('biz_') || normalizedTenantId.startsWith('tenant-')) {
+  // Grant access for all registered businesses (biz_*), default fallback, or allowed list
+  if (normalizedTenantId.startsWith('biz_') || normalizedTenantId === 'default') {
     return;
   }
 
