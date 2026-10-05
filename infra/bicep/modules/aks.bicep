@@ -13,6 +13,9 @@ param acrId string
 @description('The Name of the Azure Key Vault (For CSI Driver access)')
 param keyVaultName string
 
+@description('The VM size for the AKS node pool')
+param vmSize string = 'Standard_D2s_v4'
+
 resource aks 'Microsoft.ContainerService/managedClusters@2024-02-01' = {
   name: name
   location: location
@@ -25,15 +28,15 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-02-01' = {
       {
         name: 'agentpool'
         mode: 'System'
-        vmSize: 'Standard_D4s_v3' // 4 cores, 16GB RAM - good for multi-agent workloads
+        vmSize: vmSize
         osType: 'Linux'
         type: 'VirtualMachineScaleSets'
         
         // Auto-scaling enabled as requested
         enableAutoScaling: true
         minCount: 1
-        maxCount: 5
-        count: 2
+        maxCount: 3
+        count: 1
         
         vnetSubnetID: null // Let AKS create a default vnet or pass one in if networking is complex
       }

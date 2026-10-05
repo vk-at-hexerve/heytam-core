@@ -22,9 +22,11 @@ spec:
         app: heytam-core
         role: supervisor-workforce
     spec:
+      imagePullSecrets:
+        - name: acr-secret
       containers:
         - name: heytam-core
-          image: heytam/heytam-core:latest  # Replace with your registry/image
+          image: heytamprodacr.azurecr.io/heytam-core:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 10000
@@ -47,11 +49,107 @@ spec:
                 secretKeyRef:
                   name: heytam-secrets
                   key: database-url
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: mongodb-uri
             - name: REDIS_URL
               valueFrom:
                 secretKeyRef:
                   name: heytam-secrets
                   key: redis-url
+
+            # ─── Security & Auth ─────────────────────────────────────────────
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: jwt-secret
+
+            # ─── SMTP ────────────────────────────────────────────────────────
+            - name: DEFAULT_SMTP_HOST
+              value: "smtp.gmail.com"
+            - name: DEFAULT_SMTP_PORT
+              value: "587"
+            - name: DEFAULT_SMTP_USER
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: smtp-user
+            - name: DEFAULT_SMTP_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: smtp-pass
+            - name: DEFAULT_SMTP_FROM
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: smtp-user
+            - name: SMTP_HOST
+              value: "smtp.gmail.com"
+            - name: SMTP_PORT
+              value: "587"
+            - name: SMTP_USER
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: smtp-user
+            - name: SMTP_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: smtp-pass
+            - name: SMTP_FROM
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: smtp-user
+
+            # ─── Google OAuth (Calendar & Gmail) ──────────────────────────────
+            - name: GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: google-client-id
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: google-client-secret
+
+            # ─── Twilio (Voice Calls & SMS) ──────────────────────────────────
+            - name: DEFAULT_TWILIO_ACCOUNT_SID
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: twilio-account-sid
+            - name: DEFAULT_TWILIO_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: twilio-auth-token
+            - name: DEFAULT_TWILIO_FROM_PHONE
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: twilio-from-phone
+            - name: TWILIO_ACCOUNT_SID
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: twilio-account-sid
+            - name: TWILIO_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: twilio-auth-token
+            - name: TWILIO_FROM_PHONE
+              valueFrom:
+                secretKeyRef:
+                  name: heytam-secrets
+                  key: twilio-from-phone
 
             # ─── Tenant Config ───────────────────────────────────────────────
             - name: ALLOWED_TENANTS
@@ -117,7 +215,7 @@ spec:
       protocol: TCP
       port: 80
       targetPort: 10000
-  type: ClusterIP  # Change to LoadBalancer for external access
+  type: LoadBalancer
 
 ---
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -129,7 +227,7 @@ metadata:
   name: heytam-config
   namespace: heytam
 data:
-  allowed-tenants: "tenant-acme,tenant-globex,tenant-demo"
+  allowed-tenants: "tenant-acme,tenant-globex,tenant-demo,default"
   cors-origin: "*"
 
 ---

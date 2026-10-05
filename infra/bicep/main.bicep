@@ -7,6 +7,9 @@ param prefix string = 'heytam'
 @description('The environment name (e.g., dev, prod)')
 param environment string = 'prod'
 
+@description('The VM size for the AKS node pool')
+param aksVmSize string = 'Standard_D2s_v4'
+
 var resourceName = '${prefix}-${environment}'
 
 // 1. Log Analytics Workspace (for AKS monitoring)
@@ -46,6 +49,7 @@ module aks './modules/aks.bicep' = {
     logAnalyticsWorkspaceId: logAnalytics.outputs.workspaceId
     acrId: acr.outputs.acrId
     keyVaultName: keyvault.outputs.keyVaultName
+    vmSize: aksVmSize
   }
 }
 

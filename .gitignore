@@ -80,6 +80,9 @@ web_modules/
 .env.production
 .env.local
 *.env
+*secrets*.yaml
+*secrets*.json
+context.tar.gz
 
 # parcel-bundler cache
 .cache

@@ -243,21 +243,21 @@ export async function executeSubagent(options: AgentExecutionOptions): Promise<A
           .map(m => m[0])
           .filter(e => e.toLowerCase() !== senderEmail);
 
-        // Strategy 4: AI-captured email (if it's not the sender's own)
-        const aiCapturedEmail = object.capturedData?.email &&
-          object.capturedData.email.toLowerCase() !== senderEmail
-          ? object.capturedData.email
-          : undefined;
+        const isValidEmail = (e?: string | null): boolean => {
+          if (!e || typeof e !== 'string') return false;
+          return /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/.test(e.trim());
+        };
 
-        const targetEmail =
-          taggedEmailMatch?.[1] ||
-          recipientKeywordMatch?.[1] ||
-          allEmailsInInput[0] ||
-          aiCapturedEmail;
+        const targetEmail = [
+          taggedEmailMatch?.[1],
+          recipientKeywordMatch?.[1],
+          allEmailsInInput[0],
+          object.capturedData?.email,
+        ].find(isValidEmail);
 
         if (!targetEmail) {
           actionsExecuted.push(
-            `ERROR: No recipient email address found. Please specify a recipient email address in your request.`
+            `ERROR: No recipient email address found. Please specify a recipient email address in your request (e.g. 'send email to client@example.com').`
           );
         } else {
           // ── Subject extraction ─────────────────────────────────────────────

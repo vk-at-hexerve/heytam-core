@@ -11,7 +11,7 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = {
     name: 'Standard' // Use Premium if geo-replication or private endpoints are needed
   }
   properties: {
-    adminUserEnabled: false // Best practice: use Managed Identity (AcrPull) instead of admin keys
+    adminUserEnabled: true // Enable admin user for ACR authentication
   }
 }
 

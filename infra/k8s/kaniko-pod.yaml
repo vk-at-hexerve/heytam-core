@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kaniko-builder
+  namespace: default
+spec:
+  containers:
+  - name: kaniko
+    image: gcr.io/kaniko-project/executor:debug
+    command: ["/busybox/sh", "-c"]
+    args:
+    - |
+      echo "=== Kaniko Builder Pod Initialized ==="
+      echo "Awaiting source code transfer in /workspace..."
+      while [ ! -f /workspace/.ready ]; do
+        sleep 2
+      done
+      echo "Ready signal received! Commencing image build..."
+      /kaniko/executor \
+        --context=dir:///workspace \
+        --dockerfile=/workspace/Dockerfile \
+        --destination=heytamprodacr.azurecr.io/heytam-core:latest
+      BUILD_STATUS=$?
+      if [ $BUILD_STATUS -eq 0 ]; then
+        echo "=== Kaniko Build & Push Succeeded ==="
+        touch /workspace/.done
+      else
+        echo "=== Kaniko Build Failed with code $BUILD_STATUS ==="
+        touch /workspace/.failed
+      fi
+      sleep 600
+    volumeMounts:
+    - name: kaniko-secret
+      mountPath: /kaniko/.docker
+    - name: workspace
+      mountPath: /workspace
+  volumes:
+  - name: kaniko-secret
+    secret:
+      secretName: kaniko-acr-secret
+      items:
+      - key: .dockerconfigjson
+        path: config.json
+  - name: workspace
+    emptyDir: {}
+  restartPolicy: Never
