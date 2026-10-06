@@ -738,10 +738,10 @@ async function loadFromMongo() {
           verified: Boolean(o.verified ?? o.connected),
           credentials: o.credentials || o.extraConfig || {},
           extraConfig: o.extraConfig || o.credentials || {},
-          clientId: o.clientId || o.extraConfig?.clientId,
-          clientSecret: o.clientSecret || o.extraConfig?.clientSecret,
-          accessToken: o.accessToken,
-          refreshToken: o.refreshToken,
+          clientId: o.clientId || o.credentials?.clientId || o.extraConfig?.clientId || (o.provider.startsWith('google') ? process.env.GOOGLE_CLIENT_ID : undefined),
+          clientSecret: o.clientSecret || o.credentials?.clientSecret || o.extraConfig?.clientSecret || (o.provider.startsWith('google') ? process.env.GOOGLE_CLIENT_SECRET : undefined),
+          accessToken: o.accessToken || o.credentials?.accessToken || o.extraConfig?.accessToken,
+          refreshToken: o.refreshToken || o.credentials?.refreshToken || o.extraConfig?.refreshToken,
           updatedAt: o.updatedAt,
         });
       }
@@ -818,18 +818,18 @@ const GOOGLE_REDIRECT_URI = `${BACKEND_URL}/api/tools/oauth/google/callback`;
 function getTenantKeysForBusiness(businessId: string): TenantKeys {
   const keys: TenantKeys = {};
 
-  const googleConn = oauthConnectionsStore.get(`${businessId}_google`);
+  const googleConn = oauthConnectionsStore.get(`${businessId}_google`) || oauthConnectionsStore.get(`${businessId}_google_calendar`);
   if (googleConn) {
-    keys.googleClientId = googleConn.clientId || googleConn.extraConfig?.clientId;
-    keys.googleClientSecret = googleConn.clientSecret || googleConn.extraConfig?.clientSecret;
-    keys.googleAccessToken = googleConn.accessToken;
-    keys.googleRefreshToken = googleConn.refreshToken;
-    keys.googleCalendarId = googleConn.extraConfig?.googleCalendarId || googleConn.accountEmail || 'primary';
+    keys.googleClientId = googleConn.clientId || googleConn.credentials?.clientId || googleConn.credentials?.googleClientId || googleConn.extraConfig?.clientId || process.env.GOOGLE_CLIENT_ID;
+    keys.googleClientSecret = googleConn.clientSecret || googleConn.credentials?.clientSecret || googleConn.credentials?.googleClientSecret || googleConn.extraConfig?.clientSecret || process.env.GOOGLE_CLIENT_SECRET;
+    keys.googleAccessToken = googleConn.accessToken || googleConn.credentials?.accessToken || googleConn.credentials?.googleAccessToken || googleConn.extraConfig?.accessToken;
+    keys.googleRefreshToken = googleConn.refreshToken || googleConn.credentials?.refreshToken || googleConn.credentials?.googleRefreshToken || googleConn.extraConfig?.refreshToken;
+    keys.googleCalendarId = googleConn.extraConfig?.googleCalendarId || googleConn.credentials?.googleCalendarId || googleConn.accountEmail || 'primary';
   }
 
   const smtpConn = oauthConnectionsStore.get(`${businessId}_smtp`);
-  if (smtpConn && smtpConn.credentials) {
-    const sc = smtpConn.credentials;
+  if (smtpConn && (smtpConn.credentials || smtpConn.extraConfig)) {
+    const sc = smtpConn.credentials || smtpConn.extraConfig || {};
     if (sc.smtpHost) keys.smtpHost = sc.smtpHost;
     if (sc.smtpPort) keys.smtpPort = Number(sc.smtpPort);
     if (sc.smtpUser) keys.smtpUser = sc.smtpUser;
@@ -838,8 +838,8 @@ function getTenantKeysForBusiness(businessId: string): TenantKeys {
   }
 
   const twilioConn = oauthConnectionsStore.get(`${businessId}_twilio`);
-  if (twilioConn && twilioConn.credentials) {
-    const tc = twilioConn.credentials;
+  if (twilioConn && (twilioConn.credentials || twilioConn.extraConfig)) {
+    const tc = twilioConn.credentials || twilioConn.extraConfig || {};
     if (tc.twilioAccountSid) keys.twilioAccountSid = tc.twilioAccountSid;
     if (tc.twilioAuthToken) keys.twilioAuthToken = tc.twilioAuthToken;
     if (tc.twilioApiKeySid) keys.twilioApiKeySid = tc.twilioApiKeySid;
@@ -850,25 +850,44 @@ function getTenantKeysForBusiness(businessId: string): TenantKeys {
 
   const checkAgents = [
     'follow-up-agent', 'booking-agent', 'lead-concierge', 'smtp', 'google',
-    'twilio', 'voice-agent', 'outbound-calling-agent', 'sms-concierge', 'whatsapp-concierge'
+    'twilio', 'voice-agent', 'outbound-calling-agent', 'sms-concierge', 'whatsapp-concierge',
+    'campaign-agent', 'crm-agent', 'inbox-tool', 'reactivation-agent', 'review-agent', 'waitlist-agent', 'rebooking-agent'
   ];
   for (const tid of checkAgents) {
     const cfg = toolConfigStore.get(`${businessId}_${tid}`) || {};
-    if (cfg.smtpHost) keys.smtpHost = cfg.smtpHost;
-    if (cfg.smtpPort) keys.smtpPort = Number(cfg.smtpPort);
-    if (cfg.smtpUser) keys.smtpUser = cfg.smtpUser;
-    if (cfg.smtpPass) keys.smtpPass = cfg.smtpPass;
-    if (cfg.smtpFrom) keys.smtpFrom = cfg.smtpFrom;
-    if (cfg.googleClientId) keys.googleClientId = cfg.googleClientId;
-    if (cfg.googleClientSecret) keys.googleClientSecret = cfg.googleClientSecret;
-    if (cfg.googleRefreshToken) keys.googleRefreshToken = cfg.googleRefreshToken;
-    if (cfg.googleAccessToken) keys.googleAccessToken = cfg.googleAccessToken;
-    if (cfg.twilioAccountSid) keys.twilioAccountSid = cfg.twilioAccountSid;
-    if (cfg.twilioAuthToken) keys.twilioAuthToken = cfg.twilioAuthToken;
-    if (cfg.twilioApiKeySid) keys.twilioApiKeySid = cfg.twilioApiKeySid;
-    if (cfg.twilioApiKeySecret) keys.twilioApiKeySecret = cfg.twilioApiKeySecret;
-    if (cfg.twilioFromPhone) keys.twilioFromPhone = cfg.twilioFromPhone;
-    if (cfg.twilioVoice) keys.twilioVoice = cfg.twilioVoice;
+    if (cfg.smtpHost && !keys.smtpHost) keys.smtpHost = cfg.smtpHost;
+    if (cfg.smtpPort && !keys.smtpPort) keys.smtpPort = Number(cfg.smtpPort);
+    if (cfg.smtpUser && !keys.smtpUser) keys.smtpUser = cfg.smtpUser;
+    if (cfg.smtpPass && !keys.smtpPass) keys.smtpPass = cfg.smtpPass;
+    if (cfg.smtpFrom && !keys.smtpFrom) keys.smtpFrom = cfg.smtpFrom;
+    if (cfg.googleClientId && !keys.googleClientId) keys.googleClientId = cfg.googleClientId;
+    if (cfg.googleClientSecret && !keys.googleClientSecret) keys.googleClientSecret = cfg.googleClientSecret;
+    if (cfg.googleRefreshToken && !keys.googleRefreshToken) keys.googleRefreshToken = cfg.googleRefreshToken;
+    if (cfg.googleAccessToken && !keys.googleAccessToken) keys.googleAccessToken = cfg.googleAccessToken;
+    if (cfg.twilioAccountSid && !keys.twilioAccountSid) keys.twilioAccountSid = cfg.twilioAccountSid;
+    if (cfg.twilioAuthToken && !keys.twilioAuthToken) keys.twilioAuthToken = cfg.twilioAuthToken;
+    if (cfg.twilioApiKeySid && !keys.twilioApiKeySid) keys.twilioApiKeySid = cfg.twilioApiKeySid;
+    if (cfg.twilioApiKeySecret && !keys.twilioApiKeySecret) keys.twilioApiKeySecret = cfg.twilioApiKeySecret;
+    if (cfg.twilioFromPhone && !keys.twilioFromPhone) keys.twilioFromPhone = cfg.twilioFromPhone;
+    if (cfg.twilioVoice && !keys.twilioVoice) keys.twilioVoice = cfg.twilioVoice;
+  }
+
+  // System environment variable fallbacks
+  if (!keys.googleClientId && process.env.GOOGLE_CLIENT_ID) keys.googleClientId = process.env.GOOGLE_CLIENT_ID;
+  if (!keys.googleClientSecret && process.env.GOOGLE_CLIENT_SECRET) keys.googleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  if (!keys.smtpHost && process.env.DEFAULT_SMTP_HOST) keys.smtpHost = process.env.DEFAULT_SMTP_HOST;
+  if (!keys.smtpPort && process.env.DEFAULT_SMTP_PORT) keys.smtpPort = Number(process.env.DEFAULT_SMTP_PORT);
+  if (!keys.smtpUser && process.env.DEFAULT_SMTP_USER) keys.smtpUser = process.env.DEFAULT_SMTP_USER;
+  if (!keys.smtpPass && process.env.DEFAULT_SMTP_PASS) keys.smtpPass = process.env.DEFAULT_SMTP_PASS;
+  if (!keys.smtpFrom && process.env.DEFAULT_SMTP_FROM) keys.smtpFrom = process.env.DEFAULT_SMTP_FROM;
+  if (!keys.twilioAccountSid && (process.env.DEFAULT_TWILIO_ACCOUNT_SID || process.env.TWILIO_ACCOUNT_SID)) {
+    keys.twilioAccountSid = process.env.DEFAULT_TWILIO_ACCOUNT_SID || process.env.TWILIO_ACCOUNT_SID;
+  }
+  if (!keys.twilioAuthToken && (process.env.DEFAULT_TWILIO_AUTH_TOKEN || process.env.TWILIO_AUTH_TOKEN)) {
+    keys.twilioAuthToken = process.env.DEFAULT_TWILIO_AUTH_TOKEN || process.env.TWILIO_AUTH_TOKEN;
+  }
+  if (!keys.twilioFromPhone && (process.env.DEFAULT_TWILIO_FROM_PHONE || process.env.TWILIO_FROM_PHONE)) {
+    keys.twilioFromPhone = process.env.DEFAULT_TWILIO_FROM_PHONE || process.env.TWILIO_FROM_PHONE;
   }
 
   return keys;
@@ -1158,6 +1177,7 @@ app.get('/api/tools/:businessId/oauth/status', requireAuth, async (req: Request,
       const docs = await db.collection('oauth_connections').find({ businessId }).toArray();
       for (const d of docs) {
         if (d.provider) {
+          const existing = oauthConnectionsStore.get(`${businessId}_${d.provider}`) || {};
           const item = {
             provider: d.provider,
             businessId: d.businessId,
@@ -1166,6 +1186,10 @@ app.get('/api/tools/:businessId/oauth/status', requireAuth, async (req: Request,
             verified: Boolean(d.verified ?? d.connected),
             credentials: d.credentials || d.extraConfig || {},
             extraConfig: d.extraConfig || d.credentials || {},
+            clientId: d.clientId || d.credentials?.clientId || d.extraConfig?.clientId || existing.clientId || (d.provider.startsWith('google') ? process.env.GOOGLE_CLIENT_ID : undefined),
+            clientSecret: d.clientSecret || d.credentials?.clientSecret || d.extraConfig?.clientSecret || existing.clientSecret || (d.provider.startsWith('google') ? process.env.GOOGLE_CLIENT_SECRET : undefined),
+            accessToken: d.accessToken || d.credentials?.accessToken || d.extraConfig?.accessToken || existing.accessToken,
+            refreshToken: d.refreshToken || d.credentials?.refreshToken || d.extraConfig?.refreshToken || existing.refreshToken,
           };
           connections[d.provider] = item;
           oauthConnectionsStore.set(`${businessId}_${d.provider}`, item);
@@ -1403,7 +1427,8 @@ app.post('/api/tools/:businessId/oauth/connect-credentials', requireAuth, async 
     }
 
     const key = `${businessId}_${provider}`;
-    const accountEmail = credentials.accountEmail || credentials.smtpUser || (credentials.twilioAccountSid ? `${credentials.twilioAccountSid}` : undefined) || 'connected';
+    const existingConn = oauthConnectionsStore.get(key) || {};
+    const accountEmail = credentials.accountEmail || credentials.smtpUser || (credentials.twilioAccountSid ? `${credentials.twilioAccountSid}` : undefined) || existingConn.accountEmail || 'connected';
     const connObj = {
       provider,
       businessId,
@@ -1412,6 +1437,10 @@ app.post('/api/tools/:businessId/oauth/connect-credentials', requireAuth, async 
       connected: true,
       verified,
       accountEmail,
+      clientId: credentials.clientId || credentials.googleClientId || existingConn.clientId || (provider.startsWith('google') ? process.env.GOOGLE_CLIENT_ID : undefined),
+      clientSecret: credentials.clientSecret || credentials.googleClientSecret || existingConn.clientSecret || (provider.startsWith('google') ? process.env.GOOGLE_CLIENT_SECRET : undefined),
+      refreshToken: credentials.refreshToken || credentials.googleRefreshToken || existingConn.refreshToken,
+      accessToken: credentials.accessToken || credentials.googleAccessToken || existingConn.accessToken,
       updatedAt: new Date().toISOString(),
     };
     oauthConnectionsStore.set(key, connObj);
@@ -1702,6 +1731,33 @@ app.post('/api/workflows/:businessId/:workflowId/run', requireAuth, async (req: 
       }
     }
   }
+
+  // Ensure latest credentials from MongoDB are loaded
+  try {
+    const db = await getMongoDb();
+    if (db) {
+      const oDocs = await db.collection('oauth_connections').find({ businessId }).toArray();
+      for (const d of oDocs) {
+        if (d.provider) {
+          const existing = oauthConnectionsStore.get(`${businessId}_${d.provider}`) || {};
+          oauthConnectionsStore.set(`${businessId}_${d.provider}`, {
+            ...existing,
+            ...d,
+            clientId: d.clientId || d.credentials?.clientId || d.extraConfig?.clientId || existing.clientId || (d.provider.startsWith('google') ? process.env.GOOGLE_CLIENT_ID : undefined),
+            clientSecret: d.clientSecret || d.credentials?.clientSecret || d.extraConfig?.clientSecret || existing.clientSecret || (d.provider.startsWith('google') ? process.env.GOOGLE_CLIENT_SECRET : undefined),
+            refreshToken: d.refreshToken || d.credentials?.refreshToken || d.extraConfig?.refreshToken || existing.refreshToken,
+            accessToken: d.accessToken || d.credentials?.accessToken || d.extraConfig?.accessToken || existing.accessToken,
+          });
+        }
+      }
+      const tDocs = await db.collection('tool_configurations').find({ businessId }).toArray();
+      for (const tc of tDocs) {
+        if (tc.toolId && tc.config) {
+          toolConfigStore.set(`${businessId}_${tc.toolId}`, tc.config);
+        }
+      }
+    }
+  } catch {}
 
   const tenantKeys = getTenantKeysForBusiness(businessId);
   if (triggerData?.twilioVoice) {

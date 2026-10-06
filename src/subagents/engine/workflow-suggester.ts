@@ -225,7 +225,8 @@ export function suggestWorkflow(prompt: string, options?: SuggestWorkflowOptions
 
   // 3. Outbound Voice Calling
   else if (text.includes('call') || text.includes('phone') || text.includes('dial') || text.includes('voice')) {
-    idealWorkflow = {
+    const hasBookingIntent = /book|appoint|reserv|schedul|calendar|slot/i.test(prompt);
+    idealWorkflow = hasBookingIntent ? {
       name: 'Voice Calling & Booking Flow',
       description: 'Places outbound voice call via Twilio and confirms appointment.',
       trigger: 'Outbound Telephony Trigger',
@@ -235,6 +236,15 @@ export function suggestWorkflow(prompt: string, options?: SuggestWorkflowOptions
         { order: 2, agentId: 'booking-agent', agentName: 'Booking Agent (Calendar)' },
       ],
       extractedTriggerData: { ...defaultTriggerData, service: 'Outbound Voice Call & Booking' },
+    } : {
+      name: 'Outbound Voice Outreach Flow',
+      description: 'Places conversational AI voice call via Twilio and engages contact with real-time dialogue.',
+      trigger: 'Outbound Telephony Trigger',
+      explanation: 'Voice Agent dials the contact via Twilio with natural speech synthesis and real-time back-and-forth speech interaction.',
+      steps: [
+        { order: 1, agentId: 'voice-agent', agentName: 'Voice Agent (Outbound Call)' },
+      ],
+      extractedTriggerData: { ...defaultTriggerData, service: 'Outbound Voice Call' },
     };
   }
 
