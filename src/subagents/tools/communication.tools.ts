@@ -9,6 +9,12 @@ import nodemailer from 'nodemailer';
 import type { TenantKeys } from '../schema.js';
 import { getTwilioClient } from './twilio-client.js';
 import { normalizePhone } from '../utils/phone-parser.js';
+import {
+  generateGatherTwiML,
+  getPublicBackendUrl,
+  upsertCallSession,
+  type CallSession,
+} from '../engine/voice-session.js';
 
 export function createCommunicationTools(keys: TenantKeys) {
   const hasTwilioCreds = (keys.twilioAccountSid || keys.twilioApiKeySid) &&
@@ -86,11 +92,44 @@ export function createCommunicationTools(keys: TenantKeys) {
           const client = await getTwilioClient(keys);
           const cleanTo = normalizePhone(to) || to;
           const selectedVoice = voice || keys.twilioVoice || 'Polly.Joanna-Neural';
+          const publicBase = getPublicBackendUrl();
+          const turnUrl = `${publicBase}/api/voice/webhook/turn?voice=${encodeURIComponent(selectedVoice)}&direction=outbound`;
+          const statusUrl = `${publicBase}/api/voice/webhook/status`;
+
+          const conversationalTwiML = generateGatherTwiML({
+            speech: message,
+            voice: selectedVoice,
+            turnUrl,
+            isEnding: false,
+          });
+
           const call = await client.calls.create({
             to: cleanTo,
             from: keys.twilioFromPhone!,
-            twiml: `<Response><Say voice="${selectedVoice}">${message}</Say></Response>`,
+            twiml: conversationalTwiML,
+            statusCallback: statusUrl,
+            statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+            statusCallbackMethod: 'POST',
           });
+
+          // Register session
+          const session: CallSession = {
+            callSid: call.sid,
+            businessId: 'tool-caller',
+            from: keys.twilioFromPhone!,
+            to: cleanTo,
+            direction: 'outbound',
+            voice: selectedVoice,
+            status: 'in-progress',
+            startedAt: new Date().toISOString(),
+            turns: [{
+              role: 'ai',
+              text: message,
+              timestamp: new Date().toISOString(),
+              voice: selectedVoice,
+            }],
+          };
+          upsertCallSession(session);
 
           let latestStatus = String(call.status);
           for (let p = 0; p < 2; p++) {
@@ -104,7 +143,7 @@ export function createCommunicationTools(keys: TenantKeys) {
             }
           }
 
-          return { success: true, callSid: call.sid, status: latestStatus };
+          return { success: true, callSid: call.sid, status: latestStatus, voice: selectedVoice, interactive: true };
         } catch (err: unknown) {
           const msg = (err as Error).message;
           if (msg.includes('trial') || msg.includes('unverified')) {

@@ -224,6 +224,7 @@ export async function dispatchWorkflow(options: DispatchOptions): Promise<Orches
       tenantId: safeTenantId,
       runId,
       stepOrder: step.order,
+      twilioVoice: tenantKeys?.twilioVoice,
     });
 
     const durationMs = Date.now() - stepStart;

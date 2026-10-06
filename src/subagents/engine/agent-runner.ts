@@ -17,6 +17,13 @@ import { getAgentSystemPrompt } from './agent-registry.js';
 import { checkAgentCredentials } from './credential-checker.js';
 import { getTwilioClient } from '../tools/twilio-client.js';
 import { extractPhoneNumbers, formatSpokenVoiceScript } from '../utils/phone-parser.js';
+import {
+  generateGatherTwiML,
+  getPublicBackendUrl,
+  upsertCallSession,
+  logToOrchestrator,
+  type CallSession,
+} from './voice-session.js';
 
 export interface AgentExecutionOptions {
   agentId: string;
@@ -106,11 +113,64 @@ export async function executeSubagent(options: AgentExecutionOptions): Promise<A
 
             try {
               const targetVoice = String(twilioVoice || tenantKeys?.twilioVoice || 'Polly.Joanna-Neural').trim();
+              const publicBase = getPublicBackendUrl();
+              const turnUrl = `${publicBase}/api/voice/webhook/turn?businessId=${encodeURIComponent(tenantId || '')}&runId=${encodeURIComponent(options.runId || '')}&voice=${encodeURIComponent(targetVoice)}&direction=outbound`;
+              const statusUrl = `${publicBase}/api/voice/webhook/status?businessId=${encodeURIComponent(tenantId || '')}&runId=${encodeURIComponent(options.runId || '')}`;
+
+              const conversationalTwiML = generateGatherTwiML({
+                speech: twimlMessage,
+                voice: targetVoice,
+                turnUrl,
+                isEnding: false,
+              });
+
               const call = await twilioClient.calls.create({
                 from: tenantKeys?.twilioFromPhone!,
                 to: toPhone,
-                twiml: `<Response><Say voice="${targetVoice}">${twimlMessage}</Say></Response>`,
+                twiml: conversationalTwiML,
+                statusCallback: statusUrl,
+                statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+                statusCallbackMethod: 'POST',
               });
+
+              // Register multi-turn call session
+              const session: CallSession = {
+                callSid: call.sid,
+                businessId: tenantId || 'default-business',
+                runId: options.runId,
+                stepOrder: options.stepOrder,
+                from: tenantKeys?.twilioFromPhone!,
+                to: toPhone,
+                direction: 'outbound',
+                voice: targetVoice,
+                status: 'in-progress',
+                startedAt: new Date().toISOString(),
+                turns: [{
+                  role: 'ai',
+                  text: twimlMessage,
+                  timestamp: new Date().toISOString(),
+                  voice: targetVoice,
+                }],
+              };
+              upsertCallSession(session);
+
+              // Notify Orchestrator console in real-time
+              const nowIso = new Date().toISOString();
+              logToOrchestrator(
+                options.runId,
+                `[${nowIso}] [📞 Live Voice Call - ${call.sid.slice(-6)}] 🚀 Outbound call placed to ${toPhone} via Twilio using voice [${targetVoice}]`,
+                { stepOrder: options.stepOrder, agentId, voice: targetVoice, callSid: call.sid }
+              );
+              logToOrchestrator(
+                options.runId,
+                `[${nowIso}] [📞 Live Voice Call - ${call.sid.slice(-6)}] 🤖 AI (${targetVoice}): "${twimlMessage}"`,
+                { stepOrder: options.stepOrder, agentId, aiReply: twimlMessage, voice: targetVoice, callSid: call.sid }
+              );
+              logToOrchestrator(
+                options.runId,
+                `[${nowIso}] [📞 Live Voice Call - ${call.sid.slice(-6)}] 👂 Listening for customer voice input via Twilio STT...`,
+                { stepOrder: options.stepOrder, agentId, callSid: call.sid }
+              );
 
               // Poll Twilio for up to 3 seconds to catch live transition from "queued" -> "ringing" / "in-progress" / "completed"
               let latestStatus = call.status;
@@ -127,6 +187,9 @@ export async function executeSubagent(options: AgentExecutionOptions): Promise<A
 
               actionsExecuted.push(
                 `REAL: ${prefix}Outbound call placed to ${toPhone} via Twilio using voice [${targetVoice}] (Call SID: ${call.sid}, Status: ${latestStatus})`
+              );
+              actionsExecuted.push(
+                `🤖 AI Spoke: "${twimlMessage}" [Interactive STT back-and-forth loop active]`
               );
             } catch (callErr: unknown) {
               const errText = callErr instanceof Error ? callErr.message : 'Unknown Twilio error';

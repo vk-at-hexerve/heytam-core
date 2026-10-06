@@ -45,6 +45,20 @@ import { suggestWorkflow } from './subagents/engine/workflow-suggester.js';
 import { handleSupervisorPrompt } from './mastra/agents/heytam/index.js';
 import { TOOL_CATALOG, TOOL_BUNDLES, getToolById } from './subagents/catalog/toolCatalog.js';
 import type { TenantKeys } from './subagents/schema.js';
+import {
+  callSessionsStore,
+  getCallSession,
+  upsertCallSession,
+  getCallSessionsForBusiness,
+  registerOrchestratorLogger,
+  logToOrchestrator,
+  getPublicBackendUrl,
+  generateGatherTwiML,
+  generateClosingTwiML,
+  generateAiVoiceReply,
+  type CallSession,
+  type CallTurn,
+} from './subagents/engine/voice-session.js';
 
 // ─── Auth Types ────────────────────────────────────────────────────────────────
 interface AuthenticatedRequest extends Request {
@@ -99,6 +113,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id'],
 }));
 app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.use(morgan('combined'));
 
 // ─── Request ID middleware ─────────────────────────────────────────────────────
@@ -572,6 +587,34 @@ const oauthConnectionsStore = new Map<string, any>();
 const workflowRunsStore = new Map<string, any>();
 const customWorkflowsStore = new Map<string, any[]>();
 
+// ─── Real-time Voice Orchestrator Event Hook ──────────────────────────────────
+// Automatically streams every telephone turn (customer speech + AI reply) directly
+// into the HeyTam Orchestrator execution logs and step output of that call run.
+registerOrchestratorLogger((runId, logLine, meta) => {
+  const run = workflowRunsStore.get(runId);
+  if (run) {
+    if (!Array.isArray(run.orchestratorLog)) run.orchestratorLog = [];
+    run.orchestratorLog.push(logLine);
+
+    const callingAgents = ['voice-agent', 'outbound-calling-agent', 'receptionist-agent'];
+    const step = run.steps?.find((s: any) =>
+      (meta?.stepOrder && s.order === meta.stepOrder) || callingAgents.includes(s.agentId)
+    );
+    if (step) {
+      if (!Array.isArray(step.logs)) step.logs = [];
+      step.logs.push(logLine);
+      if (meta?.callSid) {
+        const session = callSessionsStore.get(meta.callSid);
+        if (session && session.turns && session.turns.length > 0) {
+          step.output = session.turns
+            .map(t => `${t.role === 'customer' ? '👤 Customer' : `🤖 AI (${t.voice || session.voice || 'Voice'})`}: "${t.text}"`)
+            .join('\n');
+        }
+      }
+    }
+  }
+});
+
 let mongoClient: MongoClient | null = null;
 let mongoDbInstance: any = null;
 
@@ -624,6 +667,7 @@ function savePersistentStores() {
       oauthConnectionsStore: Array.from(oauthConnectionsStore.entries()),
       workflowRunsStore: Array.from(workflowRunsStore.entries()),
       customWorkflowsStore: Array.from(customWorkflowsStore.entries()),
+      callSessionsStore: Array.from(callSessionsStore.entries()),
     };
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
   } catch (err) {
@@ -753,6 +797,9 @@ function loadPersistentStores() {
       }
       if (Array.isArray(data.customWorkflowsStore)) {
         for (const [k, v] of data.customWorkflowsStore) customWorkflowsStore.set(k, v);
+      }
+      if (Array.isArray(data.callSessionsStore)) {
+        for (const [k, v] of data.callSessionsStore) callSessionsStore.set(k, v);
       }
       console.log('💾 [Persistence] Successfully loaded stored credentials, tools, businesses, and workflows from disk!');
     }
@@ -1908,6 +1955,334 @@ app.put('/api/business/:id', requireAuth, (req: Request, res: Response) => {
   savePersistentStores();
   const { passwordHash: _ph2, ...publicUpdated } = updated;
   return res.json({ success: true, business: publicUpdated });
+});
+
+// =============================================================================
+// ─── Interactive Conversational Voice Webhooks & Real-time Call Management ────
+// Handles Twilio Speech-to-Text (<Gather>), LLM reasoning, voice pack selection,
+// and live streaming of customer conversation into HeyTam Orchestrator.
+// =============================================================================
+
+// POST & GET /api/voice/webhook/turn — Processes each spoken dialogue turn from Twilio STT
+app.all(['/api/voice/webhook/turn', '/api/voice/webhook/turns'], async (req: Request, res: Response) => {
+  try {
+    const speechResult = String(req.body?.SpeechResult || req.query?.SpeechResult || '').trim();
+    const callSid = String(req.body?.CallSid || req.query?.CallSid || `CALL_${Date.now()}`).trim();
+    const fromPhone = String(req.body?.From || req.query?.From || 'Customer').trim();
+    const toPhone = String(req.body?.To || req.query?.To || '').trim();
+    const direction = String(req.query?.direction || req.body?.direction || 'outbound');
+
+    // Extract or resolve business and run context
+    let businessId = String(req.query?.businessId || req.body?.businessId || '').trim();
+    let runId = String(req.query?.runId || req.body?.runId || '').trim();
+    let targetVoice = String(req.query?.voice || req.body?.voice || '').trim();
+
+    // If session already exists, inherit its parameters
+    let session = getCallSession(callSid);
+    if (session) {
+      if (!businessId) businessId = session.businessId;
+      if (!runId && session.runId) runId = session.runId;
+      if (!targetVoice && session.voice) targetVoice = session.voice;
+    }
+
+    // Fallback business lookup by To phone
+    if (!businessId && toPhone) {
+      for (const [bId, conn] of oauthConnectionsStore.entries()) {
+        if (conn?.credentials?.twilioFromPhone === toPhone) {
+          businessId = conn.businessId;
+          break;
+        }
+      }
+    }
+    if (!businessId) businessId = DEFAULT_BUSINESS.id;
+
+    const biz = businessesStore.get(businessId) || DEFAULT_BUSINESS;
+    const bizKeys = getTenantKeysForBusiness(businessId);
+    if (!targetVoice) {
+      targetVoice = bizKeys.twilioVoice || 'Polly.Joanna-Neural';
+    }
+
+    if (!session) {
+      session = {
+        callSid,
+        businessId,
+        runId: runId || undefined,
+        from: fromPhone,
+        to: toPhone,
+        direction: direction as 'inbound' | 'outbound',
+        voice: targetVoice,
+        status: 'in-progress',
+        startedAt: new Date().toISOString(),
+        turns: [],
+      };
+      upsertCallSession(session);
+    }
+
+    const publicBase = getPublicBackendUrl();
+    const turnUrl = `${publicBase}/api/voice/webhook/turn?businessId=${encodeURIComponent(businessId)}&runId=${encodeURIComponent(runId)}&voice=${encodeURIComponent(targetVoice)}&direction=${encodeURIComponent(direction)}`;
+
+    // 1. If customer spoke (SpeechResult captured by Twilio STT)
+    if (speechResult) {
+      const nowIso = new Date().toISOString();
+      // Record customer turn
+      session.turns.push({
+        role: 'customer',
+        text: speechResult,
+        timestamp: nowIso,
+        confidence: Number(req.body?.Confidence) || 0.95,
+      });
+
+      // Stream customer speech directly to HeyTam Orchestrator
+      const customerLog = `[${nowIso}] [📞 Live Voice Call - ${callSid.slice(-6)}] 👤 Customer: "${speechResult}"`;
+      console.log(`[Twilio Webhook] ${customerLog}`);
+      logToOrchestrator(runId, customerLog, {
+        customerSpeech: speechResult,
+        voice: targetVoice,
+        callSid,
+      });
+
+      // Autonomous AI Spoken Response Generation
+      const { replyText, isClosing } = await generateAiVoiceReply({
+        businessName: biz.name || 'HeyTam Clinic',
+        businessServices: biz.services || ['Eye Care', 'Consultations', 'Appointments'],
+        businessTone: biz.tone || 'Warm, empathetic, and professional',
+        history: session.turns,
+        customerSpeech: speechResult,
+        openaiApiKey: bizKeys.openaiApiKey || process.env.OPENAI_API_KEY,
+      });
+
+      // Record AI turn
+      const aiTimestamp = new Date().toISOString();
+      session.turns.push({
+        role: 'ai',
+        text: replyText,
+        timestamp: aiTimestamp,
+        voice: targetVoice,
+      });
+
+      // Stream AI response directly to HeyTam Orchestrator
+      const aiLog = `[${aiTimestamp}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🤖 AI (${targetVoice}): "${replyText}"`;
+      console.log(`[Twilio Webhook] ${aiLog}`);
+      logToOrchestrator(runId, aiLog, {
+        aiReply: replyText,
+        voice: targetVoice,
+        callSid,
+      });
+
+      if (isClosing || session.turns.length >= 16) {
+        logToOrchestrator(
+          runId,
+          `[${new Date().toISOString()}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🏁 Call completed successfully with customer.`
+        );
+        session.status = 'completed';
+        session.endedAt = new Date().toISOString();
+        savePersistentStores();
+
+        const closingTwiML = generateClosingTwiML({ speech: replyText, voice: targetVoice });
+        return res.type('text/xml').send(closingTwiML);
+      }
+
+      // Continue back-and-forth conversation loop
+      savePersistentStores();
+      const nextTwiML = generateGatherTwiML({
+        speech: replyText,
+        voice: targetVoice,
+        turnUrl,
+        isEnding: false,
+      });
+      return res.type('text/xml').send(nextTwiML);
+    }
+
+    // 2. Customer was silent or speech recognition timed out
+    const silenceTurns = session.turns.filter(t => t.text.includes("didn't hear") || t.text.includes("didn't catch")).length;
+    if (silenceTurns < 2) {
+      const promptRepeat = `I'm sorry, I didn't quite catch that. Could you please repeat?`;
+      session.turns.push({
+        role: 'ai',
+        text: promptRepeat,
+        timestamp: new Date().toISOString(),
+        voice: targetVoice,
+      });
+      logToOrchestrator(
+        runId,
+        `[${new Date().toISOString()}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🤖 AI (${targetVoice}): "${promptRepeat}"`
+      );
+      const repeatTwiML = generateGatherTwiML({
+        speech: promptRepeat,
+        voice: targetVoice,
+        turnUrl,
+        isEnding: false,
+      });
+      return res.type('text/xml').send(repeatTwiML);
+    } else {
+      const farewell = `Thank you for connecting with ${biz.name || 'HeyTam'}. If you need anything else, please reach back out anytime. Have a wonderful day!`;
+      session.status = 'completed';
+      session.endedAt = new Date().toISOString();
+      savePersistentStores();
+      logToOrchestrator(
+        runId,
+        `[${new Date().toISOString()}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🏁 Call ended due to inactivity.`
+      );
+      const closeTwiML = generateClosingTwiML({ speech: farewell, voice: targetVoice });
+      return res.type('text/xml').send(closeTwiML);
+    }
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : 'Unknown voice webhook error';
+    console.error('[Twilio Webhook Error]', err);
+    const fallbackTwiML = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna-Neural">Thank you for calling. Our team will follow up with you shortly. Goodbye!</Say>
+  <Hangup/>
+</Response>`;
+    return res.type('text/xml').send(fallbackTwiML);
+  }
+});
+
+// POST & GET /api/voice/webhook/inbound — Inbound Call Receptionist
+app.all(['/api/voice/webhook/inbound', '/api/voice/inbound'], async (req: Request, res: Response) => {
+  try {
+    const callSid = String(req.body?.CallSid || req.query?.CallSid || `INBOUND_${Date.now()}`).trim();
+    const callerNumber = String(req.body?.From || req.query?.From || 'Unknown Caller').trim();
+    const calledNumber = String(req.body?.To || req.query?.To || '').trim();
+
+    // Identify business
+    let businessId = String(req.query?.businessId || req.body?.businessId || '').trim();
+    if (!businessId && calledNumber) {
+      for (const [bId, conn] of oauthConnectionsStore.entries()) {
+        if (conn?.credentials?.twilioFromPhone === calledNumber) {
+          businessId = conn.businessId;
+          break;
+        }
+      }
+    }
+    if (!businessId) businessId = DEFAULT_BUSINESS.id;
+
+    const biz = businessesStore.get(businessId) || DEFAULT_BUSINESS;
+    const bizKeys = getTenantKeysForBusiness(businessId);
+    const targetVoice = String(req.query?.voice || bizKeys.twilioVoice || 'Polly.Joanna-Neural').trim();
+
+    // Create a live workflow run for this incoming call so it streams in the Orchestrator
+    const runId = `run_inbound_${Date.now()}`;
+    const greetingText = `Hello! Thank you for calling ${biz.name || 'HeyTam'}. This is your AI front-desk receptionist. How can I assist you today?`;
+
+    const inboundRun = {
+      id: runId,
+      runId,
+      businessId,
+      workflowId: 'inbound-receptionist-call',
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      orchestratorLog: [
+        `[${new Date().toISOString()}] [HeyTam Core Supervisor] 📞 Incoming call detected from ${callerNumber} to ${biz.name || 'HeyTam'} (${calledNumber || 'Reception'})`,
+        `[${new Date().toISOString()}] [HeyTam Core Supervisor] Assigned to AI Voice Receptionist Pod with voice [${targetVoice}]`,
+        `[${new Date().toISOString()}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🤖 AI (${targetVoice}): "${greetingText}"`,
+        `[${new Date().toISOString()}] [📞 Live Voice Call - ${callSid.slice(-6)}] 👂 Listening for caller's spoken response via Twilio STT...`,
+      ],
+      steps: [{
+        order: 1,
+        agentId: 'receptionist-agent',
+        agentName: 'AI Voice Receptionist',
+        status: 'running',
+        output: `🤖 AI Receptionist: "${greetingText}"`,
+        logs: [
+          `Inbound call connected: CallSid ${callSid}`,
+          `Greeting caller ${callerNumber} using Twilio voice ${targetVoice}`,
+        ],
+      }],
+      finalOutput: 'Inbound conversation active',
+    };
+    workflowRunsStore.set(runId, inboundRun);
+
+    // Register active call session
+    const session: CallSession = {
+      callSid,
+      businessId,
+      runId,
+      stepOrder: 1,
+      from: callerNumber,
+      to: calledNumber,
+      direction: 'inbound',
+      voice: targetVoice,
+      status: 'in-progress',
+      startedAt: new Date().toISOString(),
+      turns: [{
+        role: 'ai',
+        text: greetingText,
+        timestamp: new Date().toISOString(),
+        voice: targetVoice,
+      }],
+    };
+    upsertCallSession(session);
+    savePersistentStores();
+
+    const publicBase = getPublicBackendUrl();
+    const turnUrl = `${publicBase}/api/voice/webhook/turn?businessId=${encodeURIComponent(businessId)}&runId=${encodeURIComponent(runId)}&voice=${encodeURIComponent(targetVoice)}&direction=inbound`;
+
+    const twiml = generateGatherTwiML({
+      speech: greetingText,
+      voice: targetVoice,
+      turnUrl,
+      isEnding: false,
+    });
+
+    res.type('text/xml').send(twiml);
+  } catch (err: unknown) {
+    console.error('[Inbound Voice Error]', err);
+    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna-Neural">Thank you for calling. Please leave a message or reach back out shortly. Goodbye!</Say>
+  <Hangup/>
+</Response>`);
+  }
+});
+
+// POST & GET /api/voice/webhook/status — Call Termination & Status Callback
+app.all(['/api/voice/webhook/status', '/api/voice/status'], (req: Request, res: Response) => {
+  const callSid = String(req.body?.CallSid || req.query?.CallSid || '').trim();
+  const callStatus = String(req.body?.CallStatus || req.query?.CallStatus || 'completed').trim();
+  const duration = Number(req.body?.CallDuration || req.query?.CallDuration || 0);
+
+  if (callSid) {
+    const session = getCallSession(callSid);
+    if (session) {
+      session.status = callStatus as any;
+      session.durationSeconds = duration;
+      session.endedAt = new Date().toISOString();
+
+      if (session.runId) {
+        logToOrchestrator(
+          session.runId,
+          `[${new Date().toISOString()}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🏁 Call concluded (Status: ${callStatus}, Spoken Duration: ${duration}s)`
+        );
+        const run = workflowRunsStore.get(session.runId);
+        if (run && run.status === 'running' && session.direction === 'inbound') {
+          run.status = 'completed';
+          run.completedAt = new Date().toISOString();
+        }
+      }
+      savePersistentStores();
+    }
+  }
+
+  res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response/>');
+});
+
+// GET /api/voice/calls/:businessId — List call sessions and transcripts
+app.get('/api/voice/calls/:businessId', requireAuth, (req: Request, res: Response) => {
+  const businessId = (req as AuthenticatedRequest).businessId;
+  const calls = getCallSessionsForBusiness(businessId);
+  res.json({ success: true, calls, count: calls.length });
+});
+
+// GET /api/voice/calls/:businessId/:callSid — Get single call details
+app.get('/api/voice/calls/:businessId/:callSid', requireAuth, (req: Request, res: Response) => {
+  const businessId = (req as AuthenticatedRequest).businessId;
+  const callSid = String(req.params.callSid);
+  const session = getCallSession(callSid);
+  if (!session || session.businessId !== businessId) {
+    return res.status(404).json({ error: 'Call session not found' });
+  }
+  res.json({ success: true, session });
 });
 
 // ─── 404 Handler ──────────────────────────────────────────────────────────────
