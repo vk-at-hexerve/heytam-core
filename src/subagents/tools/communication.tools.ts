@@ -77,17 +77,19 @@ export function createCommunicationTools(keys: TenantKeys) {
       inputSchema: z.object({
         to: z.string().describe('E.164 phone number to call.'),
         message: z.string().describe('Spoken message to deliver via Twilio TTS.'),
+        voice: z.string().optional().describe('Twilio voice pack (e.g. Polly.Joanna-Neural, Polly.Matthew-Neural).'),
       }),
-      execute: async ({ to, message }: { to: string; message: string }) => {
+      execute: async ({ to, message, voice }: { to: string; message: string; voice?: string }) => {
         if (!hasTwilioCreds)
           return { success: false, error: 'Twilio credentials not provided by tenant.' };
         try {
           const client = await getTwilioClient(keys);
           const cleanTo = normalizePhone(to) || to;
+          const selectedVoice = voice || keys.twilioVoice || 'Polly.Joanna-Neural';
           const call = await client.calls.create({
             to: cleanTo,
             from: keys.twilioFromPhone!,
-            twiml: `<Response><Say voice="Polly.Joanna">${message}</Say></Response>`,
+            twiml: `<Response><Say voice="${selectedVoice}">${message}</Say></Response>`,
           });
 
           let latestStatus = String(call.status);

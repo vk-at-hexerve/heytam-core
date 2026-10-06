@@ -73,6 +73,38 @@ const smsProviderField: ConfigField = {
   ],
 };
 
+export const TWILIO_VOICE_PACKS = [
+  { value: 'Polly.Joanna-Neural', label: '✨ Joanna (Neural Female, US — Warm & Empathetic Receptionist) [Recommended]' },
+  { value: 'Polly.Matthew-Neural', label: '✨ Matthew (Neural Male, US — Confident & Professional)' },
+  { value: 'Polly.Ruth-Neural', label: '✨ Ruth (Neural Female, US — Conversational & Friendly)' },
+  { value: 'Polly.Stephen-Neural', label: '✨ Stephen (Neural Male, US — Calm & Reassuring)' },
+  { value: 'Polly.Danielle-Neural', label: '✨ Danielle (Neural Female, US — Upbeat & Engaging)' },
+  { value: 'Polly.Amy-Neural', label: '✨ Amy (Neural Female, UK — Crisp & Courteous)' },
+  { value: 'Polly.Arthur-Neural', label: '✨ Arthur (Neural Male, UK — Polite & Gentle)' },
+  { value: 'Polly.Olivia-Neural', label: '✨ Olivia (Neural Female, AU — Direct & Friendly)' },
+  { value: 'Polly.Kajal-Neural', label: '✨ Kajal (Neural Female, IN — Natural Indian English)' },
+  { value: 'Polly.Lupe-Neural', label: '✨ Lupe (Neural Female, US Spanish / Bilingual)' },
+  { value: 'Polly.Joanna', label: 'Joanna (Standard Female, US)' },
+  { value: 'Polly.Matthew', label: 'Matthew (Standard Male, US)' },
+  { value: 'alice', label: 'Alice (Classic Twilio Voice)' },
+];
+
+const twilioCallingFields: ConfigField[] = [
+  { key: 'twilioAccountSid', label: 'Twilio Account SID / API Key SID', type: 'text', placeholder: 'ACxxxxxxxx... or SKxxxxxxxx...', required: true, dependsOn: { field: 'provider', value: 'twilio' } },
+  { key: 'twilioAuthToken', label: 'Twilio Auth Token / Secret', type: 'password', placeholder: 'Your auth token or secret', required: true, dependsOn: { field: 'provider', value: 'twilio' } },
+  { key: 'twilioApiKeySecret', label: 'Twilio Client Secret (Optional, for API Key SID)', type: 'password', placeholder: 'API Key Client Secret', required: false, dependsOn: { field: 'provider', value: 'twilio' } },
+  { key: 'twilioFromPhone', label: 'Twilio Phone Number', type: 'text', placeholder: '+15551234567', required: true, dependsOn: { field: 'provider', value: 'twilio' } },
+  {
+    key: 'twilioVoice',
+    label: 'Twilio In-Built Voice Pack',
+    type: 'select',
+    options: TWILIO_VOICE_PACKS,
+    required: false,
+    helpText: 'Select the Twilio human neural voice pack to use when making calls. Neural voices sound natural and expressive.',
+    dependsOn: { field: 'provider', value: 'twilio' },
+  },
+];
+
 const twilioFields: ConfigField[] = [
   { key: 'twilioAccountSid', label: 'Twilio Account SID / API Key SID', type: 'text', placeholder: 'ACxxxxxxxx... or SKxxxxxxxx...', required: true, dependsOn: { field: 'provider', value: 'twilio' } },
   { key: 'twilioAuthToken', label: 'Twilio Auth Token / Secret', type: 'password', placeholder: 'Your auth token or secret', required: true, dependsOn: { field: 'provider', value: 'twilio' } },
@@ -108,7 +140,7 @@ const callingConfigSections: ToolConfigSection[] = [
   {
     sectionKey: 'provider_creds',
     sectionLabel: 'Provider & Credentials',
-    fields: [callingProviderField, ...twilioFields, ...plivoFields, ...telnyxFields, ...vonageFields],
+    fields: [callingProviderField, ...twilioCallingFields, ...plivoFields, ...telnyxFields, ...vonageFields],
   },
   {
     sectionKey: 'calling_settings',

@@ -93,6 +93,7 @@ export interface TenantKeys {
   twilioApiKeySid?: string;
   twilioApiKeySecret?: string;
   twilioFromPhone?: string;
+  twilioVoice?: string;
   smtpHost?: string;
   smtpPort?: number;
   smtpUser?: string;

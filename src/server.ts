@@ -29,6 +29,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import dns from 'dns';
+try { dns.setServers(['8.8.8.8', '1.1.1.1']); } catch {}
+import { MongoClient } from 'mongodb';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -569,6 +572,45 @@ const oauthConnectionsStore = new Map<string, any>();
 const workflowRunsStore = new Map<string, any>();
 const customWorkflowsStore = new Map<string, any[]>();
 
+let mongoClient: MongoClient | null = null;
+let mongoDbInstance: any = null;
+
+async function getMongoDb() {
+  if (mongoDbInstance) return mongoDbInstance;
+  const uri = process.env.MONGODB_URI || process.env.DATABASE_URL;
+  if (!uri) return null;
+  try {
+    mongoClient = new MongoClient(uri);
+    await mongoClient.connect();
+    mongoDbInstance = mongoClient.db(process.env.MONGODB_DB || 'heytam-ai-agents');
+    console.log('✅ [MongoDB] Connected to MongoDB Atlas for multi-tenant credentials & workforce state.');
+    return mongoDbInstance;
+  } catch (err) {
+    console.warn('[MongoDB Warning] Could not connect to MongoDB Atlas, falling back to local file/memory store:', err);
+    return null;
+  }
+}
+
+function checkIsConfigured(cfg: any): boolean {
+  if (!cfg || typeof cfg !== 'object' || Object.keys(cfg).length === 0) return false;
+  return Boolean(
+    cfg.smtpHost ||
+    cfg.googleClientId ||
+    cfg.googleRefreshToken ||
+    cfg.accessToken ||
+    cfg.twilioAccountSid ||
+    cfg.twilioApiKeySid ||
+    cfg.twilioFromPhone ||
+    cfg.hubspotApiKey ||
+    cfg.ghlApiKey ||
+    cfg.plivoAuthId ||
+    cfg.calendlyApiKey ||
+    cfg.metaAccessToken ||
+    cfg.oauthConnected ||
+    cfg.verified
+  );
+}
+
 function savePersistentStores() {
   try {
     if (!fs.existsSync(DATA_DIR)) {
@@ -585,7 +627,104 @@ function savePersistentStores() {
     };
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
   } catch (err) {
-    console.error('[Persistence Error] Failed to save store:', err);
+    console.error('[Persistence Error] Failed to save store to disk:', err);
+  }
+
+  // Non-blocking sync to MongoDB Atlas
+  getMongoDb().then(async (db) => {
+    if (!db) return;
+    try {
+      // Upsert OAuth connections
+      for (const [key, val] of oauthConnectionsStore.entries()) {
+        if (val && val.businessId && val.provider) {
+          await db.collection('oauth_connections').updateOne(
+            { businessId: val.businessId, provider: val.provider },
+            { $set: { ...val, updatedAt: new Date().toISOString() } },
+            { upsert: true }
+          );
+        }
+      }
+      // Upsert Tool Configs
+      for (const [key, val] of toolConfigStore.entries()) {
+        const parts = key.split('_');
+        if (parts.length >= 2) {
+          const bizId = parts.slice(0, 2).join('_');
+          const toolId = parts.slice(2).join('_');
+          await db.collection('tool_configurations').updateOne(
+            { businessId: bizId, toolId: toolId },
+            { $set: { businessId: bizId, toolId: toolId, config: val, isConfigured: checkIsConfigured(val), updatedAt: new Date().toISOString() } },
+            { upsert: true }
+          );
+        }
+      }
+      // Upsert Businesses
+      for (const [id, val] of businessesStore.entries()) {
+        await db.collection('businesses').updateOne(
+          { id },
+          { $set: { ...val, updatedAt: new Date().toISOString() } },
+          { upsert: true }
+        );
+      }
+    } catch (e) {
+      console.error('[MongoDB Error] Async save error:', e);
+    }
+  }).catch(() => {});
+}
+
+async function loadFromMongo() {
+  try {
+    const db = await getMongoDb();
+    if (!db) return;
+
+    // 1. Businesses
+    const businesses = await db.collection('businesses').find({}).toArray();
+    for (const b of businesses) {
+      if (b.id) businessesStore.set(b.id, b);
+    }
+
+    // 2. OAuth connections
+    const oauths = await db.collection('oauth_connections').find({}).toArray();
+    for (const o of oauths) {
+      if (o.businessId && o.provider) {
+        oauthConnectionsStore.set(`${o.businessId}_${o.provider}`, {
+          provider: o.provider,
+          businessId: o.businessId,
+          accountEmail: o.accountEmail,
+          connected: Boolean(o.connected),
+          verified: Boolean(o.verified ?? o.connected),
+          credentials: o.credentials || o.extraConfig || {},
+          extraConfig: o.extraConfig || o.credentials || {},
+          clientId: o.clientId || o.extraConfig?.clientId,
+          clientSecret: o.clientSecret || o.extraConfig?.clientSecret,
+          accessToken: o.accessToken,
+          refreshToken: o.refreshToken,
+          updatedAt: o.updatedAt,
+        });
+      }
+    }
+
+    // 3. Tool configurations
+    const toolConfigs = await db.collection('tool_configurations').find({}).toArray();
+    for (const tc of toolConfigs) {
+      if (tc.businessId && tc.toolId) {
+        toolConfigStore.set(`${tc.businessId}_${tc.toolId}`, tc.config || {});
+      }
+    }
+
+    // 4. Business tools
+    const bTools = await db.collection('business_tools').find({}).toArray();
+    const grouped = new Map<string, any[]>();
+    for (const bt of bTools) {
+      if (!grouped.has(bt.businessId)) grouped.set(bt.businessId, []);
+      grouped.get(bt.businessId)!.push(bt);
+    }
+    for (const [bizId, list] of grouped.entries()) {
+      businessToolsStore.set(bizId, list);
+    }
+
+    console.log(`💾 [Persistence] Synced with MongoDB Atlas: ${businesses.length} businesses, ${oauths.length} oauth conns, ${toolConfigs.length} tool configs, ${bTools.length} tools`);
+  } catch (err) {
+    console.error('[Persistence Error] Failed to load from MongoDB:', err);
   }
 }
 
@@ -623,6 +762,7 @@ function loadPersistentStores() {
 }
 
 loadPersistentStores();
+loadFromMongo();
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:4000';
@@ -658,6 +798,7 @@ function getTenantKeysForBusiness(businessId: string): TenantKeys {
     if (tc.twilioApiKeySid) keys.twilioApiKeySid = tc.twilioApiKeySid;
     if (tc.twilioApiKeySecret) keys.twilioApiKeySecret = tc.twilioApiKeySecret;
     if (tc.twilioFromPhone) keys.twilioFromPhone = tc.twilioFromPhone;
+    if (tc.twilioVoice) keys.twilioVoice = tc.twilioVoice;
   }
 
   const checkAgents = [
@@ -680,6 +821,7 @@ function getTenantKeysForBusiness(businessId: string): TenantKeys {
     if (cfg.twilioApiKeySid) keys.twilioApiKeySid = cfg.twilioApiKeySid;
     if (cfg.twilioApiKeySecret) keys.twilioApiKeySecret = cfg.twilioApiKeySecret;
     if (cfg.twilioFromPhone) keys.twilioFromPhone = cfg.twilioFromPhone;
+    if (cfg.twilioVoice) keys.twilioVoice = cfg.twilioVoice;
   }
 
   return keys;
@@ -697,7 +839,7 @@ function getInitialBusinessTools(businessId: string) {
   return starterIds.map(id => {
     const meta = getToolById(id);
     const cfg = toolConfigStore.get(`${businessId}_${id}`);
-    const isConfigured = Boolean(cfg && Object.keys(cfg).length > 0 && (cfg.smtpHost || cfg.googleClientId || cfg.googleRefreshToken || cfg.accessToken));
+    const isConfigured = checkIsConfigured(cfg);
     return {
       id: `bt_${businessId}_${id}`,
       businessId,
@@ -724,15 +866,33 @@ app.get('/api/tools/catalog', (_req: Request, res: Response) => {
 });
 
 // GET /api/tools/:businessId — active tools for a business
-app.get('/api/tools/:businessId', requireAuth, (req: Request, res: Response) => {
+app.get('/api/tools/:businessId', requireAuth, async (req: Request, res: Response) => {
   const businessId = (req as AuthenticatedRequest).businessId;
+  if (!businessToolsStore.has(businessId)) {
+    try {
+      const db = await getMongoDb();
+      if (db) {
+        const docs = await db.collection('business_tools').find({ businessId }).toArray();
+        if (docs.length > 0) {
+          businessToolsStore.set(businessId, docs);
+        }
+      }
+    } catch {}
+  }
   if (!businessToolsStore.has(businessId)) {
     businessToolsStore.set(businessId, getInitialBusinessTools(businessId));
   }
   const tools = businessToolsStore.get(businessId) || [];
   const enriched = tools.map(t => {
     const meta = getToolById(t.toolId);
-    return { ...t, meta: meta || t.meta || null };
+    const cfg = toolConfigStore.get(`${businessId}_${t.toolId}`) || {};
+    const isConfig = checkIsConfigured(cfg) || Boolean(t.isConfigured);
+    return {
+      ...t,
+      status: isConfig ? 'active' : (t.status || 'needs_setup'),
+      isConfigured: isConfig,
+      meta: meta || t.meta || null,
+    };
   });
   res.json({ success: true, tools: enriched });
 });
@@ -851,12 +1011,26 @@ app.delete('/api/tools/:businessId/:toolId', requireAuth, (req: Request, res: Re
 });
 
 // GET /api/tools/:businessId/:toolId/config — get tool config
-app.get('/api/tools/:businessId/:toolId/config', requireAuth, (req: Request, res: Response) => {
+app.get('/api/tools/:businessId/:toolId/config', requireAuth, async (req: Request, res: Response) => {
   const businessId = (req as AuthenticatedRequest).businessId;
   const { toolId } = req.params;
   const key = `${businessId}_${toolId}`;
-  const config = toolConfigStore.get(key) || {};
-  const isConfigured = Boolean(config && Object.keys(config).length > 0 && (config.smtpHost || config.googleClientId || config.googleRefreshToken || config.accessToken));
+  let config = toolConfigStore.get(key) || {};
+
+  if (!config || Object.keys(config).length === 0) {
+    try {
+      const db = await getMongoDb();
+      if (db) {
+        const doc = await db.collection('tool_configurations').findOne({ businessId, toolId });
+        if (doc && doc.config) {
+          config = doc.config;
+          toolConfigStore.set(key, config);
+        }
+      }
+    } catch {}
+  }
+
+  const isConfigured = checkIsConfigured(config);
   res.json({ success: true, isConfigured, config });
 });
 
@@ -920,7 +1094,7 @@ app.post('/api/tools/:businessId/:toolId/test', requireAuth, async (req: Request
 });
 
 // GET /api/tools/:businessId/oauth/status
-app.get('/api/tools/:businessId/oauth/status', requireAuth, (req: Request, res: Response) => {
+app.get('/api/tools/:businessId/oauth/status', requireAuth, async (req: Request, res: Response) => {
   const businessId = (req as AuthenticatedRequest).businessId;
   const connections: Record<string, any> = {};
   for (const [key, value] of oauthConnectionsStore.entries()) {
@@ -929,6 +1103,30 @@ app.get('/api/tools/:businessId/oauth/status', requireAuth, (req: Request, res: 
       connections[provider] = value;
     }
   }
+
+  // Ensure consistency across multiple pods via MongoDB Atlas
+  try {
+    const db = await getMongoDb();
+    if (db) {
+      const docs = await db.collection('oauth_connections').find({ businessId }).toArray();
+      for (const d of docs) {
+        if (d.provider) {
+          const item = {
+            provider: d.provider,
+            businessId: d.businessId,
+            accountEmail: d.accountEmail,
+            connected: Boolean(d.connected),
+            verified: Boolean(d.verified ?? d.connected),
+            credentials: d.credentials || d.extraConfig || {},
+            extraConfig: d.extraConfig || d.credentials || {},
+          };
+          connections[d.provider] = item;
+          oauthConnectionsStore.set(`${businessId}_${d.provider}`, item);
+        }
+      }
+    }
+  } catch {}
+
   res.json({ success: true, connections });
 });
 
@@ -1158,13 +1356,21 @@ app.post('/api/tools/:businessId/oauth/connect-credentials', requireAuth, async 
     }
 
     const key = `${businessId}_${provider}`;
-    oauthConnectionsStore.set(key, {
+    const accountEmail = credentials.accountEmail || credentials.smtpUser || (credentials.twilioAccountSid ? `${credentials.twilioAccountSid}` : undefined) || 'connected';
+    const connObj = {
       provider,
       businessId,
       credentials,
+      extraConfig: credentials,
+      connected: true,
       verified,
+      accountEmail,
       updatedAt: new Date().toISOString(),
-    });
+    };
+    oauthConnectionsStore.set(key, connObj);
+    if (provider === 'google') {
+      oauthConnectionsStore.set(`${businessId}_google_calendar`, { ...connObj, provider: 'google_calendar' });
+    }
 
     if (provider === 'twilio') {
       const twilioAgents = ['voice-agent', 'outbound-calling-agent', 'sms-concierge', 'whatsapp-concierge', 'twilio'];
@@ -1451,6 +1657,9 @@ app.post('/api/workflows/:businessId/:workflowId/run', requireAuth, async (req: 
   }
 
   const tenantKeys = getTenantKeysForBusiness(businessId);
+  if (triggerData?.twilioVoice) {
+    tenantKeys.twilioVoice = String(triggerData.twilioVoice).trim();
+  }
 
   try {
     const result = await dispatchWorkflow({

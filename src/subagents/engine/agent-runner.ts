@@ -27,6 +27,7 @@ export interface AgentExecutionOptions {
   tenantId?: string;
   runId?: string;
   stepOrder?: number;
+  twilioVoice?: string;
 }
 
 /**
@@ -41,6 +42,7 @@ export async function executeSubagent(options: AgentExecutionOptions): Promise<A
     tenantContext = 'HeyTam AI Workforce — Business',
     tenantKeys = {},
     tenantId,
+    twilioVoice,
   } = options;
 
   const timestamp = new Date().toISOString();
@@ -103,10 +105,11 @@ export async function executeSubagent(options: AgentExecutionOptions): Promise<A
             const prefix = targetPhones.length > 1 ? `[${idx + 1}/${targetPhones.length}] ` : '';
 
             try {
+              const targetVoice = String(twilioVoice || tenantKeys?.twilioVoice || 'Polly.Joanna-Neural').trim();
               const call = await twilioClient.calls.create({
                 from: tenantKeys?.twilioFromPhone!,
                 to: toPhone,
-                twiml: `<Response><Say voice="Polly.Joanna">${twimlMessage}</Say></Response>`,
+                twiml: `<Response><Say voice="${targetVoice}">${twimlMessage}</Say></Response>`,
               });
 
               // Poll Twilio for up to 3 seconds to catch live transition from "queued" -> "ringing" / "in-progress" / "completed"
@@ -123,7 +126,7 @@ export async function executeSubagent(options: AgentExecutionOptions): Promise<A
               }
 
               actionsExecuted.push(
-                `REAL: ${prefix}Outbound call placed to ${toPhone} via Twilio (Call SID: ${call.sid}, Status: ${latestStatus})`
+                `REAL: ${prefix}Outbound call placed to ${toPhone} via Twilio using voice [${targetVoice}] (Call SID: ${call.sid}, Status: ${latestStatus})`
               );
             } catch (callErr: unknown) {
               const errText = callErr instanceof Error ? callErr.message : 'Unknown Twilio error';
