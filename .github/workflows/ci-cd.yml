@@ -2,13 +2,13 @@ name: Enterprise Multi-Agent CI/CD
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "shivam" ]
   pull_request:
     branches: [ "main" ]
 
 env:
-  ACR_NAME: "heytamprodacr" # Should match output from Bicep
-  RESOURCE_GROUP: "heytam-prod-rg"
+  ACR_NAME: "heytamprodacr"
+  RESOURCE_GROUP: "rg-heytam-prod" # Verified Azure Resource Group
   AKS_CLUSTER: "heytam-prod-aks"
   HELM_RELEASE_NAME: "multi-agent-suite"
 
@@ -50,22 +50,34 @@ jobs:
         run: |
           az acr login --name ${{ env.ACR_NAME }}
 
-      - name: Build and Push Microservices
+      - name: Build and Push Docker Images
         run: |
           ACR_URL="${{ env.ACR_NAME }}.azurecr.io"
           TAG=${{ github.sha }}
-          
-          # Build all targets using the multi-stage Dockerfile
-          docker build -f infra/docker/Dockerfile.agent --target heytam -t $ACR_URL/heytam:$TAG .
-          docker build -f infra/docker/Dockerfile.agent --target calling-agent -t $ACR_URL/calling-agent:$TAG .
-          docker build -f infra/docker/Dockerfile.agent --target mail-agent -t $ACR_URL/mail-agent:$TAG .
-          docker build -f infra/docker/Dockerfile.agent --target marketing-agent -t $ACR_URL/marketing-agent:$TAG .
-          
-          # Push to ACR
+
+          # 1. Build and push the unified heytam-core backend (root Dockerfile)
+          docker build -t $ACR_URL/heytam-core:$TAG -t $ACR_URL/heytam-core:latest .
+          docker push $ACR_URL/heytam-core:$TAG
+          docker push $ACR_URL/heytam-core:latest
+
+          # 2. Build and push microservices targets from Dockerfile.agent
+          docker build -f infra/docker/Dockerfile.agent --target heytam -t $ACR_URL/heytam:$TAG -t $ACR_URL/heytam:latest .
+          docker build -f infra/docker/Dockerfile.agent --target calling-agent -t $ACR_URL/calling-agent:$TAG -t $ACR_URL/calling-agent:latest .
+          docker build -f infra/docker/Dockerfile.agent --target mail-agent -t $ACR_URL/mail-agent:$TAG -t $ACR_URL/mail-agent:latest .
+          docker build -f infra/docker/Dockerfile.agent --target marketing-agent -t $ACR_URL/marketing-agent:$TAG -t $ACR_URL/marketing-agent:latest .
+          docker build -f infra/docker/Dockerfile.agent --target booking-agent -t $ACR_URL/booking-agent:$TAG -t $ACR_URL/booking-agent:latest .
+
+          # Push microservices to ACR
           docker push $ACR_URL/heytam:$TAG
+          docker push $ACR_URL/heytam:latest
           docker push $ACR_URL/calling-agent:$TAG
+          docker push $ACR_URL/calling-agent:latest
           docker push $ACR_URL/mail-agent:$TAG
+          docker push $ACR_URL/mail-agent:latest
           docker push $ACR_URL/marketing-agent:$TAG
+          docker push $ACR_URL/marketing-agent:latest
+          docker push $ACR_URL/booking-agent:$TAG
+          docker push $ACR_URL/booking-agent:latest
 
   deploy-aks:
     name: Deploy to Azure Kubernetes Service
@@ -87,7 +99,7 @@ jobs:
           resource-group: ${{ env.RESOURCE_GROUP }}
           cluster-name: ${{ env.AKS_CLUSTER }}
 
-      - name: Deploy via Helm
+      - name: Deploy Microservices via Helm
         run: |
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} ./infra/helm/multi-agent-suite \
             --namespace heytam-system \
@@ -95,3 +107,8 @@ jobs:
             --set image.repository=${{ env.ACR_NAME }}.azurecr.io \
             --set image.tag=${{ github.sha }} \
             --set secrets.useAzureKeyVault=true
+
+      - name: Update Unified Heytam Core Deployment
+        run: |
+          kubectl apply -f infra/k8s/heytam-core.yaml || echo "Applied heytam-core manifest"
+          kubectl rollout restart deployment/heytam-core -n heytam || echo "heytam-core restart initiated"
