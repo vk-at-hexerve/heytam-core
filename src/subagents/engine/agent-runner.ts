@@ -19,6 +19,7 @@ import { getTwilioClient } from '../tools/twilio-client.js';
 import { extractPhoneNumbers, formatSpokenVoiceScript } from '../utils/phone-parser.js';
 import {
   generateGatherTwiML,
+  generateElevenLabsAudioBuffer,
   getPublicBackendUrl,
   upsertCallSession,
   logToOrchestrator,
@@ -117,11 +118,31 @@ export async function executeSubagent(options: AgentExecutionOptions): Promise<A
               const turnUrl = `${publicBase}/api/voice/webhook/turn?businessId=${encodeURIComponent(tenantId || '')}&runId=${encodeURIComponent(options.runId || '')}&voice=${encodeURIComponent(targetVoice)}&direction=outbound`;
               const statusUrl = `${publicBase}/api/voice/webhook/status?businessId=${encodeURIComponent(tenantId || '')}&runId=${encodeURIComponent(options.runId || '')}`;
 
+              let initialAudioUrl: string | null = null;
+              if (tenantKeys?.useElevenLabs && (tenantKeys?.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY)) {
+                try {
+                  const elRes = await generateElevenLabsAudioBuffer({
+                    text: twimlMessage,
+                    voiceId: tenantKeys?.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM',
+                    apiKey: tenantKeys?.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY,
+                    modelId: tenantKeys?.elevenLabsModel || 'eleven_turbo_v2_5',
+                    stability: tenantKeys?.elevenLabsStability,
+                    similarityBoost: tenantKeys?.elevenLabsSimilarity,
+                  });
+                  if (elRes) {
+                    initialAudioUrl = `${publicBase}/api/voice/elevenlabs/audio/${elRes.cacheId}.mp3`;
+                  }
+                } catch (e) {
+                  console.warn('[ElevenLabs outbound audio generation failed, using Polly]', e);
+                }
+              }
+
               const conversationalTwiML = generateGatherTwiML({
                 speech: twimlMessage,
                 voice: targetVoice,
                 turnUrl,
                 isEnding: false,
+                audioUrl: initialAudioUrl,
               });
 
               const call = await twilioClient.calls.create({

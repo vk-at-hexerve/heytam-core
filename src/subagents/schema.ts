@@ -109,4 +109,12 @@ export interface TenantKeys {
   googleSheetId?: string;
   mongoUri?: string;
   mongoDatabase?: string;
+  // ElevenLabs Voice Layer (AI Human Speech)
+  elevenLabsApiKey?: string;
+  elevenLabsVoiceId?: string;
+  elevenLabsModel?: string;
+  elevenLabsStability?: number;
+  elevenLabsSimilarity?: number;
+  useElevenLabs?: boolean;
 }
+

@@ -77,6 +77,99 @@ export function logToOrchestrator(
   }
 }
 
+import crypto from 'crypto';
+
+export interface ElevenLabsAudioOptions {
+  text: string;
+  voiceId?: string;
+  apiKey?: string;
+  modelId?: string;
+  stability?: number;
+  similarityBoost?: number;
+}
+
+// In-memory cache for generated ElevenLabs audio buffers
+export const elevenLabsAudioCache = new Map<string, { buffer: Buffer; contentType: string; createdAt: number }>();
+
+export function getElevenLabsCacheKey(options: ElevenLabsAudioOptions): string {
+  const hash = crypto.createHash('sha256');
+  hash.update(`${options.text}__${options.voiceId || '21m00Tcm4TlvDq8ikWAM'}__${options.modelId || 'eleven_turbo_v2_5'}`);
+  return hash.digest('hex').slice(0, 24);
+}
+
+/**
+ * Generate audio buffer via ElevenLabs Text-to-Speech API
+ */
+export async function generateElevenLabsAudioBuffer(
+  options: ElevenLabsAudioOptions
+): Promise<{ buffer: Buffer; cacheId: string } | null> {
+  const text = (options.text || '').trim();
+  if (!text) return null;
+
+  const cacheId = getElevenLabsCacheKey(options);
+  const cached = elevenLabsAudioCache.get(cacheId);
+  if (cached) {
+    return { buffer: cached.buffer, cacheId };
+  }
+
+  const apiKey = options.apiKey || process.env.ELEVENLABS_API_KEY;
+  if (!apiKey) {
+    console.warn('[ElevenLabs] No API key provided for ElevenLabs audio generation.');
+    return null;
+  }
+
+  const voiceId = options.voiceId && options.voiceId !== 'custom'
+    ? options.voiceId
+    : '21m00Tcm4TlvDq8ikWAM'; // Default Rachel
+
+  const modelId = options.modelId || 'eleven_turbo_v2_5';
+
+  try {
+    const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_128`, {
+      method: 'POST',
+      headers: {
+        'xi-api-key': apiKey,
+        'Content-Type': 'application/json',
+        'Accept': 'audio/mpeg',
+      },
+      body: JSON.stringify({
+        text,
+        model_id: modelId,
+        voice_settings: {
+          stability: typeof options.stability === 'number' ? options.stability : 0.50,
+          similarity_boost: typeof options.similarityBoost === 'number' ? options.similarityBoost : 0.75,
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error(`[ElevenLabs API Error] Status ${res.status}:`, errText);
+      return null;
+    }
+
+    const arrayBuffer = await res.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    elevenLabsAudioCache.set(cacheId, {
+      buffer,
+      contentType: 'audio/mpeg',
+      createdAt: Date.now(),
+    });
+
+    // Keep cache bounded
+    if (elevenLabsAudioCache.size > 200) {
+      const oldestKey = elevenLabsAudioCache.keys().next().value;
+      if (oldestKey) elevenLabsAudioCache.delete(oldestKey);
+    }
+
+    return { buffer, cacheId };
+  } catch (err) {
+    console.error('[ElevenLabs Generation Exception]:', err);
+    return null;
+  }
+}
+
 /**
  * Get public backend URL reachable by Twilio webhooks
  */
@@ -87,12 +180,12 @@ export function getPublicBackendUrl(): string {
   if (process.env.BACKEND_PUBLIC_URL && !process.env.BACKEND_PUBLIC_URL.includes('localhost')) {
     return process.env.BACKEND_PUBLIC_URL.replace(/\/+$/, '');
   }
-  // Production cluster fallback (Azure Kubernetes Service public IP)
-  return 'http://20.241.243.241';
+  // Production cluster fallback (Azure AKS HTTPS domain)
+  return 'https://api.heytam.io';
 }
 
 /**
- * Safe XML text escaping for TwiML
+ * Safe XML attribute escaping for TwiML attributes
  */
 export function escapeXml(unsafe: string): string {
   if (!unsafe) return '';
@@ -105,22 +198,41 @@ export function escapeXml(unsafe: string): string {
 }
 
 /**
+ * Safe XML text escaping for TwiML inner text nodes (<Say>, etc.)
+ * Keeps standard contractions ("I'm", "don't") intact without &apos; mispronunciation
+ */
+export function escapeXmlText(unsafe: string): string {
+  if (!unsafe) return '';
+  return unsafe
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
  * Generate interactive TwiML response with <Gather input="speech">
+ * Supports both ElevenLabs audio layer (<Play>) and Twilio native speech (<Say>)
  */
 export function generateGatherTwiML(options: {
   speech: string;
   voice: string;
   turnUrl: string;
   isEnding?: boolean;
+  audioUrl?: string | null;
 }): string {
-  const { speech, voice, turnUrl, isEnding } = options;
-  const escapedSpeech = escapeXml(speech);
+  const { speech, voice, turnUrl, isEnding, audioUrl } = options;
+  const escapedSpeech = escapeXmlText(speech);
   const escapedVoice = escapeXml(voice || 'Polly.Joanna-Neural');
+
+  // If ElevenLabs audio URL is provided, Twilio <Play> executes the ElevenLabs voice layer
+  const speechNode = audioUrl
+    ? `<Play>${escapeXml(audioUrl)}</Play>`
+    : `<Say voice="${escapedVoice}">${escapedSpeech}</Say>`;
 
   if (isEnding) {
     return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="${escapedVoice}">${escapedSpeech}</Say>
+  ${speechNode}
   <Hangup/>
 </Response>`;
   }
@@ -128,7 +240,7 @@ export function generateGatherTwiML(options: {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather input="speech" speechTimeout="auto" speechModel="phone_call" timeout="5" action="${escapeXml(turnUrl)}" method="POST">
-    <Say voice="${escapedVoice}">${escapedSpeech}</Say>
+    ${speechNode}
   </Gather>
   <Say voice="${escapedVoice}">Thank you for calling. If you need further assistance, please reach back out anytime. Have a wonderful day. Goodbye!</Say>
   <Hangup/>
@@ -138,12 +250,20 @@ export function generateGatherTwiML(options: {
 /**
  * Generate ending TwiML
  */
-export function generateClosingTwiML(options: { speech: string; voice: string }): string {
-  const escapedSpeech = escapeXml(options.speech);
+export function generateClosingTwiML(options: {
+  speech: string;
+  voice: string;
+  audioUrl?: string | null;
+}): string {
+  const escapedSpeech = escapeXmlText(options.speech);
   const escapedVoice = escapeXml(options.voice || 'Polly.Joanna-Neural');
+  const speechNode = options.audioUrl
+    ? `<Play>${escapeXml(options.audioUrl)}</Play>`
+    : `<Say voice="${escapedVoice}">${escapedSpeech}</Say>`;
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="${escapedVoice}">${escapedSpeech}</Say>
+  ${speechNode}
   <Hangup/>
 </Response>`;
 }

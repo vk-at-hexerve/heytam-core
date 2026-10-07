@@ -129,6 +129,78 @@ const vonageFields: ConfigField[] = [
   { key: 'vonageFromNumber', label: 'Vonage Phone Number', type: 'text', placeholder: '+15551234567', required: true, dependsOn: { field: 'provider', value: 'vonage' } },
 ];
 
+export const ELEVENLABS_VOICES = [
+  { value: '21m00Tcm4TlvDq8ikWAM', label: '🌸 Rachel (Female US · Calm, Warm & Professional — Best for Healthcare & Reception)' },
+  { value: 'pNInz6obpgDQGcFmaJgB', label: '👔 Adam (Male US · Deep, Confident & Engaging — Best for Sales & Consultations)' },
+  { value: 'ErXwobaYiN019PkySvjV', label: '🎙️ Antoni (Male US · Natural, Gentle & Articulate — Best for Customer Support)' },
+  { value: 'EXAVITQu4vr4xnSDxMaL', label: '🌺 Bella (Female US · Vibrant, Friendly & Expressive — Best for Inbound Greetings)' },
+  { value: 'TxGEqnHWrfWFTfGW9XjX', label: '🎧 Josh (Male US · Young, Dynamic & Relatable)' },
+  { value: 'piTKgcLEGmPE4e6mEKli', label: '🕊️ Nicole (Female US · Soft, Empathetic & Comforting)' },
+  { value: 'yoZ06aMxZJJ28mfd3POQ', label: '⚡ Sam (Male US · Dynamic, Persuasive & Clear)' },
+  { value: 'AZnzlk1XvdvUeBnXmlld', label: '🌟 Domi (Female US · Strong, Empathetic Narrative)' },
+  { value: 'custom', label: '✨ Custom Cloned Voice ID (Enter your ElevenLabs voice ID below)' },
+];
+
+const elevenLabsVoiceFields: ConfigField[] = [
+  {
+    key: 'useElevenLabs',
+    label: 'Voice Layer Engine',
+    type: 'select',
+    options: [
+      { value: 'true', label: '⚡ ElevenLabs Ultra-Realistic AI Voice Layer (Recommended)' },
+      { value: 'false', label: '📞 Twilio Native Polly Voice Pack' },
+    ],
+    helpText: 'When enabled, HeyTam generates human-grade speech via ElevenLabs and streams it through Twilio telephone calls.',
+  },
+  {
+    key: 'elevenLabsApiKey',
+    label: 'ElevenLabs API Key',
+    type: 'password',
+    placeholder: 'xi-... (from elevenlabs.io)',
+    helpText: 'Your ElevenLabs API key. If left blank, falls back to system defaults.',
+  },
+  {
+    key: 'elevenLabsVoiceId',
+    label: 'ElevenLabs Voice Persona',
+    type: 'select',
+    options: ELEVENLABS_VOICES,
+    helpText: 'Select the human-sounding voice persona for telephone calls.',
+  },
+  {
+    key: 'elevenLabsCustomVoiceId',
+    label: 'Custom Voice ID (Optional)',
+    type: 'text',
+    placeholder: 'e.g. 21m00Tcm4TlvDq8ikWAM or cloned voice ID',
+    helpText: 'Enter your custom cloned voice ID from ElevenLabs if Custom Voice is selected.',
+    dependsOn: { field: 'elevenLabsVoiceId', value: 'custom' },
+  },
+  {
+    key: 'elevenLabsModel',
+    label: 'AI Voice Model (Latency / Quality)',
+    type: 'select',
+    options: [
+      { value: 'eleven_turbo_v2_5', label: '⚡ Eleven Turbo v2.5 (Fastest · Low Latency for Live Phone Calls)' },
+      { value: 'eleven_multilingual_v2', label: '🌟 Eleven Multilingual v2 (Maximum Expressiveness & Realism)' },
+      { value: 'eleven_flash_v2', label: '🚀 Eleven Flash v2 (Ultra-fast streaming)' },
+    ],
+    helpText: 'Turbo v2.5 delivers ultra-low response latency (~250ms) for natural phone conversations.',
+  },
+  {
+    key: 'elevenLabsStability',
+    label: 'Voice Stability (0.0 to 1.0)',
+    type: 'text',
+    placeholder: '0.50',
+    helpText: 'Higher = consistent and steady tone. Lower = expressive and dynamic.',
+  },
+  {
+    key: 'elevenLabsSimilarity',
+    label: 'Clarity / Similarity Boost (0.0 to 1.0)',
+    type: 'text',
+    placeholder: '0.75',
+    helpText: 'Higher = stricter adherence to target voice tone and clear pronunciation.',
+  },
+];
+
 const callingCommonFields: ConfigField[] = [
   { key: 'webhookCallbackUrl', label: 'Webhook Callback URL (optional)', type: 'url', placeholder: 'https://your-server.com/webhook/calls', helpText: 'Receives call status updates.' },
   { key: 'businessHoursStart', label: 'Business Hours Start', type: 'text', placeholder: '09:00', helpText: 'e.g., 09:00 (24h format)' },
@@ -138,13 +210,18 @@ const callingCommonFields: ConfigField[] = [
 
 const callingConfigSections: ToolConfigSection[] = [
   {
+    sectionKey: 'elevenlabs_voice_layer',
+    sectionLabel: '✨ ElevenLabs AI Voice Layer (Human-Grade Speech)',
+    fields: elevenLabsVoiceFields,
+  },
+  {
     sectionKey: 'provider_creds',
-    sectionLabel: 'Provider & Credentials',
+    sectionLabel: 'Telephony Carrier (Twilio)',
     fields: [callingProviderField, ...twilioCallingFields, ...plivoFields, ...telnyxFields, ...vonageFields],
   },
   {
     sectionKey: 'calling_settings',
-    sectionLabel: 'Calling Settings',
+    sectionLabel: 'Calling Schedule & Controls',
     fields: callingCommonFields,
   },
 ];

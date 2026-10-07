@@ -43,7 +43,7 @@ dotenv.config();
 import { dispatchWorkflow, dispatchSingleAgent, getAgentCatalog } from './subagents/engine/master-dispatcher.js';
 import { suggestWorkflow } from './subagents/engine/workflow-suggester.js';
 import { handleSupervisorPrompt } from './mastra/agents/heytam/index.js';
-import { TOOL_CATALOG, TOOL_BUNDLES, getToolById } from './subagents/catalog/toolCatalog.js';
+import { TOOL_CATALOG, TOOL_BUNDLES, getToolById, ELEVENLABS_VOICES } from './subagents/catalog/toolCatalog.js';
 import type { TenantKeys } from './subagents/schema.js';
 import {
   callSessionsStore,
@@ -56,6 +56,9 @@ import {
   generateGatherTwiML,
   generateClosingTwiML,
   generateAiVoiceReply,
+  generateElevenLabsAudioBuffer,
+  elevenLabsAudioCache,
+  getElevenLabsCacheKey,
   type CallSession,
   type CallTurn,
 } from './subagents/engine/voice-session.js';
@@ -848,10 +851,22 @@ function getTenantKeysForBusiness(businessId: string): TenantKeys {
     if (tc.twilioVoice) keys.twilioVoice = tc.twilioVoice;
   }
 
+  // ElevenLabs dedicated connection
+  const elevenLabsConn = oauthConnectionsStore.get(`${businessId}_elevenlabs`);
+  if (elevenLabsConn && (elevenLabsConn.credentials || elevenLabsConn.extraConfig)) {
+    const el = elevenLabsConn.credentials || elevenLabsConn.extraConfig || {};
+    if (el.elevenLabsApiKey) keys.elevenLabsApiKey = el.elevenLabsApiKey;
+    if (el.elevenLabsVoiceId) keys.elevenLabsVoiceId = el.elevenLabsVoiceId;
+    if (el.elevenLabsModel) keys.elevenLabsModel = el.elevenLabsModel;
+    if (el.useElevenLabs !== undefined) keys.useElevenLabs = el.useElevenLabs === true || el.useElevenLabs === 'true';
+    if (el.elevenLabsStability) keys.elevenLabsStability = Number(el.elevenLabsStability);
+    if (el.elevenLabsSimilarity) keys.elevenLabsSimilarity = Number(el.elevenLabsSimilarity);
+  }
+
   const checkAgents = [
     'follow-up-agent', 'booking-agent', 'lead-concierge', 'smtp', 'google',
     'twilio', 'voice-agent', 'outbound-calling-agent', 'sms-concierge', 'whatsapp-concierge',
-    'campaign-agent', 'crm-agent', 'inbox-tool', 'reactivation-agent', 'review-agent', 'waitlist-agent', 'rebooking-agent'
+    'campaign-agent', 'crm-agent', 'inbox-tool', 'reactivation-agent', 'review-agent', 'waitlist-agent', 'rebooking-agent', 'elevenlabs'
   ];
   for (const tid of checkAgents) {
     const cfg = toolConfigStore.get(`${businessId}_${tid}`) || {};
@@ -870,6 +885,17 @@ function getTenantKeysForBusiness(businessId: string): TenantKeys {
     if (cfg.twilioApiKeySecret && !keys.twilioApiKeySecret) keys.twilioApiKeySecret = cfg.twilioApiKeySecret;
     if (cfg.twilioFromPhone && !keys.twilioFromPhone) keys.twilioFromPhone = cfg.twilioFromPhone;
     if (cfg.twilioVoice && !keys.twilioVoice) keys.twilioVoice = cfg.twilioVoice;
+    // ElevenLabs Agent-level configs
+    if (cfg.elevenLabsApiKey && !keys.elevenLabsApiKey) keys.elevenLabsApiKey = cfg.elevenLabsApiKey;
+    if (cfg.elevenLabsVoiceId && !keys.elevenLabsVoiceId) {
+      keys.elevenLabsVoiceId = cfg.elevenLabsVoiceId === 'custom' ? cfg.elevenLabsCustomVoiceId : cfg.elevenLabsVoiceId;
+    }
+    if (cfg.elevenLabsModel && !keys.elevenLabsModel) keys.elevenLabsModel = cfg.elevenLabsModel;
+    if (cfg.useElevenLabs !== undefined && keys.useElevenLabs === undefined) {
+      keys.useElevenLabs = cfg.useElevenLabs === true || cfg.useElevenLabs === 'true';
+    }
+    if (cfg.elevenLabsStability && !keys.elevenLabsStability) keys.elevenLabsStability = Number(cfg.elevenLabsStability);
+    if (cfg.elevenLabsSimilarity && !keys.elevenLabsSimilarity) keys.elevenLabsSimilarity = Number(cfg.elevenLabsSimilarity);
   }
 
   // System environment variable fallbacks
@@ -888,6 +914,14 @@ function getTenantKeysForBusiness(businessId: string): TenantKeys {
   }
   if (!keys.twilioFromPhone && (process.env.DEFAULT_TWILIO_FROM_PHONE || process.env.TWILIO_FROM_PHONE)) {
     keys.twilioFromPhone = process.env.DEFAULT_TWILIO_FROM_PHONE || process.env.TWILIO_FROM_PHONE;
+  }
+
+  // ElevenLabs environment fallback & defaults
+  if (!keys.elevenLabsApiKey && process.env.ELEVENLABS_API_KEY) keys.elevenLabsApiKey = process.env.ELEVENLABS_API_KEY;
+  if (!keys.elevenLabsVoiceId) keys.elevenLabsVoiceId = '21m00Tcm4TlvDq8ikWAM'; // Rachel (Female US)
+  if (!keys.elevenLabsModel) keys.elevenLabsModel = 'eleven_turbo_v2_5';
+  if (keys.useElevenLabs === undefined && keys.elevenLabsApiKey) {
+    keys.useElevenLabs = true;
   }
 
   return keys;
@@ -2014,6 +2048,134 @@ app.put('/api/business/:id', requireAuth, (req: Request, res: Response) => {
 });
 
 // =============================================================================
+// ─── ElevenLabs Ultra-Realistic Voice Layer Endpoints ─────────────────────────
+// Generates and streams human-quality AI voice audio over Twilio telephony calls.
+// =============================================================================
+
+// GET /api/voice/elevenlabs/audio/:id.mp3 — Serves cached ElevenLabs MP3 audio to Twilio <Play>
+app.get(['/api/voice/elevenlabs/audio/:id.mp3', '/api/voice/elevenlabs/audio/:id'], (req: Request, res: Response) => {
+  const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const cacheId = String(rawId || '').replace(/\.mp3$/, '');
+  const cached = elevenLabsAudioCache.get(cacheId);
+  if (!cached) {
+    return res.status(404).send('Audio not found or expired');
+  }
+  res.set('Content-Type', cached.contentType || 'audio/mpeg');
+  res.set('Cache-Control', 'public, max-age=86400');
+  return res.send(cached.buffer);
+});
+
+// GET /api/voice/elevenlabs/tts — Dynamic ElevenLabs speech synthesis stream
+app.get('/api/voice/elevenlabs/tts', async (req: Request, res: Response) => {
+  try {
+    const text = String(req.query.text || '').trim();
+    if (!text) {
+      return res.status(400).send('Text parameter is required');
+    }
+    const businessId = String(req.query.businessId || DEFAULT_BUSINESS.id).trim();
+    const keys = getTenantKeysForBusiness(businessId);
+    const voiceId = String(req.query.voiceId || keys.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM').trim();
+    const apiKey = String(req.query.apiKey || keys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY || '').trim();
+    const modelId = String(req.query.modelId || keys.elevenLabsModel || 'eleven_turbo_v2_5').trim();
+
+    const audioResult = await generateElevenLabsAudioBuffer({
+      text,
+      voiceId,
+      apiKey,
+      modelId,
+      stability: keys.elevenLabsStability,
+      similarityBoost: keys.elevenLabsSimilarity,
+    });
+
+    if (!audioResult) {
+      return res.status(500).send('ElevenLabs speech generation failed');
+    }
+
+    res.set('Content-Type', 'audio/mpeg');
+    res.set('Cache-Control', 'public, max-age=86400');
+    return res.send(audioResult.buffer);
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : 'Unknown ElevenLabs TTS error';
+    return res.status(500).send(errorMsg);
+  }
+});
+
+// POST /api/voice/elevenlabs/preview — Live Voice Preview Player for Frontend Configuration Panel
+app.post('/api/voice/elevenlabs/preview', async (req: Request, res: Response) => {
+  try {
+    const { text, voiceId, apiKey, modelId, stability, similarityBoost, businessId } = req.body;
+    const sampleText = String(text || 'Hello! This is HeyTam speaking with ultra-realistic ElevenLabs AI voice. How may I assist you today?').trim();
+    const keys = getTenantKeysForBusiness(businessId || DEFAULT_BUSINESS.id);
+    const targetApiKey = String(apiKey || keys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY || '').trim();
+    const targetVoiceId = String(voiceId || keys.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM').trim();
+    const targetModel = String(modelId || keys.elevenLabsModel || 'eleven_turbo_v2_5').trim();
+
+    if (!targetApiKey) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please enter your ElevenLabs API key in the configuration panel to preview audio.',
+      });
+    }
+
+    const audioResult = await generateElevenLabsAudioBuffer({
+      text: sampleText,
+      voiceId: targetVoiceId,
+      apiKey: targetApiKey,
+      modelId: targetModel,
+      stability: typeof stability === 'number' ? stability : 0.50,
+      similarityBoost: typeof similarityBoost === 'number' ? similarityBoost : 0.75,
+    });
+
+    if (!audioResult) {
+      return res.status(400).json({
+        success: false,
+        error: 'ElevenLabs generation failed. Please check your API key and voice selection.',
+      });
+    }
+
+    const publicBase = getPublicBackendUrl();
+    const audioUrl = `${publicBase}/api/voice/elevenlabs/audio/${audioResult.cacheId}.mp3`;
+    return res.json({
+      success: true,
+      cacheId: audioResult.cacheId,
+      audioUrl,
+      voiceId: targetVoiceId,
+      modelId: targetModel,
+    });
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : 'Unknown preview error';
+    return res.status(500).json({ success: false, error: errorMsg });
+  }
+});
+
+// GET /api/voice/elevenlabs/voices — Curated & Custom Cloned Voice Catalog
+app.get('/api/voice/elevenlabs/voices', async (req: Request, res: Response) => {
+  const apiKey = String(req.query.apiKey || process.env.ELEVENLABS_API_KEY || '').trim();
+  const curated = ELEVENLABS_VOICES;
+  let customVoices: any[] = [];
+
+  if (apiKey) {
+    try {
+      const elRes = await fetch('https://api.elevenlabs.io/v1/voices', {
+        headers: { 'xi-api-key': apiKey },
+      });
+      if (elRes.ok) {
+        const data = await elRes.json();
+        customVoices = (data.voices || []).map((v: any) => ({
+          value: v.voice_id,
+          label: `✨ ${v.name} (${v.labels?.gender || 'Voice'} · ${v.category || 'Cloned'})`,
+          category: v.category,
+        }));
+      }
+    } catch (e) {
+      console.warn('[ElevenLabs] Failed to fetch custom voices:', e);
+    }
+  }
+
+  return res.json({ voices: curated, customVoices });
+});
+
+// =============================================================================
 // ─── Interactive Conversational Voice Webhooks & Real-time Call Management ────
 // Handles Twilio Speech-to-Text (<Gather>), LLM reasoning, voice pack selection,
 // and live streaming of customer conversation into HeyTam Orchestrator.
@@ -2116,12 +2278,33 @@ app.all(['/api/voice/webhook/turn', '/api/voice/webhook/turns'], async (req: Req
         voice: targetVoice,
       });
 
+      // Synthesize ElevenLabs voice layer audio if enabled
+      let audioUrl: string | null = null;
+      if (bizKeys.useElevenLabs && (bizKeys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY)) {
+        try {
+          const elRes = await generateElevenLabsAudioBuffer({
+            text: replyText,
+            voiceId: bizKeys.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM',
+            apiKey: bizKeys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY,
+            modelId: bizKeys.elevenLabsModel || 'eleven_turbo_v2_5',
+            stability: bizKeys.elevenLabsStability,
+            similarityBoost: bizKeys.elevenLabsSimilarity,
+          });
+          if (elRes) {
+            audioUrl = `${publicBase}/api/voice/elevenlabs/audio/${elRes.cacheId}.mp3`;
+          }
+        } catch (e) {
+          console.warn('[ElevenLabs Audio Generation Error, falling back to Polly]', e);
+        }
+      }
+
       // Stream AI response directly to HeyTam Orchestrator
-      const aiLog = `[${aiTimestamp}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🤖 AI (${targetVoice}): "${replyText}"`;
+      const voiceLabel = audioUrl ? `ElevenLabs: ${bizKeys.elevenLabsVoiceId || 'Rachel'}` : targetVoice;
+      const aiLog = `[${aiTimestamp}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🤖 AI (${voiceLabel}): "${replyText}"`;
       console.log(`[Twilio Webhook] ${aiLog}`);
       logToOrchestrator(runId, aiLog, {
         aiReply: replyText,
-        voice: targetVoice,
+        voice: voiceLabel,
         callSid,
       });
 
@@ -2134,7 +2317,7 @@ app.all(['/api/voice/webhook/turn', '/api/voice/webhook/turns'], async (req: Req
         session.endedAt = new Date().toISOString();
         savePersistentStores();
 
-        const closingTwiML = generateClosingTwiML({ speech: replyText, voice: targetVoice });
+        const closingTwiML = generateClosingTwiML({ speech: replyText, voice: targetVoice, audioUrl });
         return res.type('text/xml').send(closingTwiML);
       }
 
@@ -2145,6 +2328,7 @@ app.all(['/api/voice/webhook/turn', '/api/voice/webhook/turns'], async (req: Req
         voice: targetVoice,
         turnUrl,
         isEnding: false,
+        audioUrl,
       });
       return res.type('text/xml').send(nextTwiML);
     }
@@ -2163,11 +2347,26 @@ app.all(['/api/voice/webhook/turn', '/api/voice/webhook/turns'], async (req: Req
         runId,
         `[${new Date().toISOString()}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🤖 AI (${targetVoice}): "${promptRepeat}"`
       );
+
+      let repeatAudioUrl: string | null = null;
+      if (bizKeys.useElevenLabs && (bizKeys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY)) {
+        const elRes = await generateElevenLabsAudioBuffer({
+          text: promptRepeat,
+          voiceId: bizKeys.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM',
+          apiKey: bizKeys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY,
+          modelId: bizKeys.elevenLabsModel || 'eleven_turbo_v2_5',
+        });
+        if (elRes) {
+          repeatAudioUrl = `${publicBase}/api/voice/elevenlabs/audio/${elRes.cacheId}.mp3`;
+        }
+      }
+
       const repeatTwiML = generateGatherTwiML({
         speech: promptRepeat,
         voice: targetVoice,
         turnUrl,
         isEnding: false,
+        audioUrl: repeatAudioUrl,
       });
       return res.type('text/xml').send(repeatTwiML);
     } else {
@@ -2179,7 +2378,21 @@ app.all(['/api/voice/webhook/turn', '/api/voice/webhook/turns'], async (req: Req
         runId,
         `[${new Date().toISOString()}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🏁 Call ended due to inactivity.`
       );
-      const closeTwiML = generateClosingTwiML({ speech: farewell, voice: targetVoice });
+
+      let closeAudioUrl: string | null = null;
+      if (bizKeys.useElevenLabs && (bizKeys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY)) {
+        const elRes = await generateElevenLabsAudioBuffer({
+          text: farewell,
+          voiceId: bizKeys.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM',
+          apiKey: bizKeys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY,
+          modelId: bizKeys.elevenLabsModel || 'eleven_turbo_v2_5',
+        });
+        if (elRes) {
+          closeAudioUrl = `${publicBase}/api/voice/elevenlabs/audio/${elRes.cacheId}.mp3`;
+        }
+      }
+
+      const closeTwiML = generateClosingTwiML({ speech: farewell, voice: targetVoice, audioUrl: closeAudioUrl });
       return res.type('text/xml').send(closeTwiML);
     }
   } catch (err: unknown) {
@@ -2274,11 +2487,25 @@ app.all(['/api/voice/webhook/inbound', '/api/voice/inbound'], async (req: Reques
     const publicBase = getPublicBackendUrl();
     const turnUrl = `${publicBase}/api/voice/webhook/turn?businessId=${encodeURIComponent(businessId)}&runId=${encodeURIComponent(runId)}&voice=${encodeURIComponent(targetVoice)}&direction=inbound`;
 
+    let inboundAudioUrl: string | null = null;
+    if (bizKeys.useElevenLabs && (bizKeys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY)) {
+      const elRes = await generateElevenLabsAudioBuffer({
+        text: greetingText,
+        voiceId: bizKeys.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM',
+        apiKey: bizKeys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY,
+        modelId: bizKeys.elevenLabsModel || 'eleven_turbo_v2_5',
+      });
+      if (elRes) {
+        inboundAudioUrl = `${publicBase}/api/voice/elevenlabs/audio/${elRes.cacheId}.mp3`;
+      }
+    }
+
     const twiml = generateGatherTwiML({
       speech: greetingText,
       voice: targetVoice,
       turnUrl,
       isEnding: false,
+      audioUrl: inboundAudioUrl,
     });
 
     res.type('text/xml').send(twiml);
