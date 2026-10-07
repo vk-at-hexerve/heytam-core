@@ -8,7 +8,7 @@ import twilio from 'twilio';
 import nodemailer from 'nodemailer';
 import type { TenantKeys } from '../schema.js';
 import { getTwilioClient } from './twilio-client.js';
-import { normalizePhone } from '../utils/phone-parser.js';
+import { normalizePhone, formatSpokenVoiceScript } from '../utils/phone-parser.js';
 import {
   generateGatherTwiML,
   generateElevenLabsAudioBuffer,
@@ -92,6 +92,7 @@ export function createCommunicationTools(keys: TenantKeys) {
         try {
           const client = await getTwilioClient(keys);
           const cleanTo = normalizePhone(to) || to;
+          const sanitizedMessage = formatSpokenVoiceScript(message);
           const selectedVoice = voice || keys.twilioVoice || 'Polly.Joanna-Neural';
           const publicBase = getPublicBackendUrl();
           const turnUrl = `${publicBase}/api/voice/webhook/turn?voice=${encodeURIComponent(selectedVoice)}&direction=outbound`;
@@ -101,7 +102,7 @@ export function createCommunicationTools(keys: TenantKeys) {
           if (keys.useElevenLabs && (keys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY)) {
             try {
               const elRes = await generateElevenLabsAudioBuffer({
-                text: message,
+                text: sanitizedMessage,
                 voiceId: keys.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM',
                 apiKey: keys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY,
                 modelId: keys.elevenLabsModel || 'eleven_turbo_v2_5',
@@ -117,7 +118,7 @@ export function createCommunicationTools(keys: TenantKeys) {
           }
 
           const conversationalTwiML = generateGatherTwiML({
-            speech: message,
+            speech: sanitizedMessage,
             voice: selectedVoice,
             turnUrl,
             isEnding: false,

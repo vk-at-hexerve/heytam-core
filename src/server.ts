@@ -182,8 +182,8 @@ app.post('/api/dispatch', async (req: Request, res: Response) => {
   try {
     const effectiveTenant = tenantId || (Array.isArray(req.headers['x-tenant-id']) ? req.headers['x-tenant-id'][0] : req.headers['x-tenant-id']) || DEFAULT_BUSINESS.id;
     const bizTools = businessToolsStore.get(effectiveTenant) || [];
-    const biz = businessesStore.get(effectiveTenant) || DEFAULT_BUSINESS;
     const subscribedToolIds = bizTools.map((t: any) => t.toolId);
+    const biz = businessesStore.get(effectiveTenant) || DEFAULT_BUSINESS;
     const allAgentsSubscribed = Boolean(
       biz.plan?.name?.toLowerCase().includes('enterprise') ||
       biz.plan?.name?.toLowerCase().includes('all') ||
@@ -191,10 +191,17 @@ app.post('/api/dispatch', async (req: Request, res: Response) => {
       subscribedToolIds.includes('*')
     );
 
+    const resolvedContext = tenantContext || `Business: ${biz.name}
+Owner: ${biz.ownerName || 'Dr. ' + biz.name}
+Location: ${biz.location || 'New York'}
+Tone: ${biz.tone || 'Warm, professional, and helpful'}
+Available Services: ${(biz.services && biz.services.length > 0) ? biz.services.join(', ') : 'Consultations, Healthcare & Aesthetic Treatments'}
+Operating & Available Timings: ${biz.hours || 'Monday through Friday from 9:00 AM to 6:00 PM, Saturday from 10:00 AM to 4:00 PM'}`;
+
     const result = await dispatchWorkflow({
       prompt: String(prompt).trim(),
       tenantId: effectiveTenant,
-      tenantContext,
+      tenantContext: resolvedContext,
       tenantKeys: tenantKeys as any,
       subscribedToolIds,
       allAgentsSubscribed,
@@ -1798,10 +1805,23 @@ app.post('/api/workflows/:businessId/:workflowId/run', requireAuth, async (req: 
     tenantKeys.twilioVoice = String(triggerData.twilioVoice).trim();
   }
 
+  const biz = businessesStore.get(businessId) || DEFAULT_BUSINESS;
+  const businessServices = (biz.services && biz.services.length > 0)
+    ? biz.services.join(', ')
+    : 'Healthcare, Aesthetic & Medical Treatments, Consultations';
+  const businessHours = biz.hours || 'Monday through Friday from 9:00 AM to 6:00 PM, Saturday from 10:00 AM to 4:00 PM';
+  const resolvedTenantContext = `Business: ${biz.name}
+Owner: ${biz.ownerName || 'Dr. ' + biz.name}
+Location: ${biz.location || 'New York'}
+Tone: ${biz.tone || 'Warm, professional, and helpful'}
+Available Services: ${businessServices}
+Operating & Available Timings: ${businessHours}`;
+
   try {
     const result = await dispatchWorkflow({
       prompt: runPrompt,
       tenantId: businessId,
+      tenantContext: resolvedTenantContext,
       tenantKeys,
       triggerData,
       overrideWorkflow: wf && Array.isArray(wf.steps) && wf.steps.length > 0 ? {

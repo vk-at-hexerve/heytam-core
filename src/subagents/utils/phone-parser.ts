@@ -101,9 +101,23 @@ export function formatSpokenVoiceScript(rawMessage: string | undefined, tenantCo
     ? bizMatch[1].trim()
     : (tenantContext && !tenantContext.includes('---') && tenantContext.trim() !== 'HeyTam AI Workforce'
         ? tenantContext.split('\n')[0].replace(/^Business:\s*/i, '').trim()
-        : 'Gold Eye Sight');
+        : 'HeyTam');
 
   let text = (rawMessage || '').replace(/<[^>]+>/g, '').trim();
+
+  // Extract operating timings from context if available
+  const timingsMatch = tenantContext?.match(/(?:Operating|Available)?\s*(?:Timings|Hours):\s*([^\n]+)/i);
+  const defaultTimings = timingsMatch ? timingsMatch[1].trim() : 'Monday through Friday from 9:00 AM to 6:00 PM';
+
+  // Scrub or replace placeholders like [insert service timings]
+  text = text
+    .replace(/\[\s*insert\s*(?:service\s*)?timings?\s*\]/gi, defaultTimings)
+    .replace(/\[\s*insert\s*(?:service\s*details?|services?)\s*\]/gi, 'our treatments and healthcare services')
+    .replace(/\[\s*insert[^\]]*\]/gi, '')
+    .replace(/\[.*?\]/g, '')
+    .replace(/\.{3,}/g, '.')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 
   // 1. Strip phone numbers or digit sequences so Twilio TTS never speaks phone numbers aloud
   text = text
@@ -128,7 +142,8 @@ export function formatSpokenVoiceScript(rawMessage: string | undefined, tenantCo
     .trim();
 
   if (!text || text.length < 8) {
-    text = 'your appointment has been successfully scheduled and booked with our team.';
+    text = `Hello! This is ${businessName}. I am calling regarding our available services and consultation timings. Our availability is ${defaultTimings}. What timing works best for you?`;
+    return text;
   }
 
   const hasGreeting = /^(hello|hi|good\s+morning|good\s+afternoon|good\s+evening)/i.test(text);

@@ -239,19 +239,35 @@ export async function dispatchWorkflow(options: DispatchOptions): Promise<Orches
     // Chain output to next step
     if (typeof result.output === 'object' && result.output !== null) {
       const out = result.output as any;
-      const details = [
+      const chainContext = [
         out.messageToUser,
         out.capturedData ? `Captured Data: ${JSON.stringify(out.capturedData)}` : null,
-        out.chainOfThought ? `Analysis: ${out.chainOfThought}` : null,
       ].filter(Boolean).join('\n');
-      previousOutput = details;
+      previousOutput = chainContext;
     } else {
       previousOutput = String(result.output);
     }
   }
 
+  // Build clean, professional user-facing summary
+  const lastStep = completedSteps[completedSteps.length - 1];
+  let cleanUserMessage = '';
+  if (lastStep?.result?.output && typeof lastStep.result.output === 'object') {
+    cleanUserMessage = (lastStep.result.output as any).messageToUser || '';
+  } else if (lastStep?.result?.output) {
+    cleanUserMessage = String(lastStep.result.output);
+  }
+
+  const allActions = completedSteps.flatMap(s => s.result?.actionsExecuted || []);
+  const distinctActions = Array.from(new Set(allActions.filter(a => a && !a.startsWith('REAL: HeyTam Core Supervisor'))));
+
+  let finalPresentation = cleanUserMessage;
+  if (distinctActions.length > 0) {
+    finalPresentation = `${cleanUserMessage}\n\nExecution Status:\n` + distinctActions.map(a => `• ${a}`).join('\n');
+  }
+
   // Restore PHI in final output
-  const restoredFinal = await phiVault.restore(previousOutput, sessionId);
+  const restoredFinal = await phiVault.restore(finalPresentation || previousOutput, sessionId);
 
   return {
     runId,

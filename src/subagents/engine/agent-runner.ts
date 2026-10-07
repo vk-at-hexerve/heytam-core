@@ -106,6 +106,7 @@ export async function executeSubagent(options: AgentExecutionOptions): Promise<A
         } else {
           // Generate a clean spoken TwiML message from the AI output without repeating phone numbers
           const twimlMessage = formatSpokenVoiceScript(object.messageToUser, tenantContext);
+          object.messageToUser = twimlMessage;
 
           // Call every phone number in sequence in a loop
           for (let idx = 0; idx < targetPhones.length; idx++) {

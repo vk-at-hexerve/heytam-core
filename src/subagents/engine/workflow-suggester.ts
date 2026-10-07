@@ -225,7 +225,7 @@ export function suggestWorkflow(prompt: string, options?: SuggestWorkflowOptions
 
   // 3. Outbound Voice Calling
   else if (text.includes('call') || text.includes('phone') || text.includes('dial') || text.includes('voice')) {
-    const hasBookingIntent = /book|appoint|reserv|schedul|calendar|slot/i.test(prompt);
+    const hasBookingIntent = /book|appoint|appoinm|reserv|schedul|calendar|calender|remaind|remind|slot|timing/i.test(prompt);
     idealWorkflow = hasBookingIntent ? {
       name: 'Voice Calling & Booking Flow',
       description: 'Places outbound voice call via Twilio and confirms appointment.',

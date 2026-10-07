@@ -239,10 +239,13 @@ export function generateGatherTwiML(options: {
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" speechTimeout="auto" speechModel="phone_call" timeout="5" action="${escapeXml(turnUrl)}" method="POST">
+  <Gather input="speech" speechTimeout="auto" speechModel="phone_call" timeout="10" action="${escapeXml(turnUrl)}" method="POST">
     ${speechNode}
   </Gather>
-  <Say voice="${escapedVoice}">Thank you for calling. If you need further assistance, please reach back out anytime. Have a wonderful day. Goodbye!</Say>
+  <Gather input="speech" speechTimeout="auto" speechModel="phone_call" timeout="8" action="${escapeXml(turnUrl)}" method="POST">
+    <Say voice="${escapedVoice}">I am still on the line. Could you let me know if those timings work for you, or if you have any questions?</Say>
+  </Gather>
+  <Say voice="${escapedVoice}">Thank you for connecting with ${escapeXml(options.speech ? '' : 'us')}. We will follow up with you shortly. Have a wonderful day!</Say>
   <Hangup/>
 </Response>`;
 }
@@ -300,7 +303,7 @@ export async function generateAiVoiceReply(options: {
   const {
     businessName,
     businessServices = [],
-    businessTone = 'Warm, professional, and empathetic',
+    businessTone = 'Warm, professional, and helpful',
     history,
     customerSpeech,
     openaiApiKey,
@@ -317,23 +320,31 @@ export async function generateAiVoiceReply(options: {
     ? createOpenAI({ apiKey: openaiApiKey })(modelName)
     : openai(modelName);
 
-  const systemInstructions = `You are the live conversational telephone AI receptionist/representative for ${businessName}.
-Services offered: ${businessServices.length > 0 ? businessServices.join(', ') : 'Consultations and appointments'}.
-Speaking Tone: ${businessTone}.
+  const servicesList = businessServices.length > 0
+    ? businessServices.join(', ')
+    : 'Medical treatments, consultations, surgeries, and healthcare procedures';
 
-CRITICAL SPOKEN VOICE GUIDELINES:
-1. You are speaking out loud on a REAL phone call via Twilio Text-to-Speech.
-2. Keep your answers concise, direct, and conversational (1 to 2 sentences maximum).
-3. Do NOT use markdown, asterisks, bullet points, numbered lists, emojis, URLs, or special characters.
-4. If the customer is asking about scheduling, prices, or services, give a helpful, courteous response.
-5. If the customer indicates they want to conclude the call (e.g. "goodbye", "bye", "that's all", "thank you bye", "see you"), say a warm goodbye and end with [END_CALL].
-6. If the customer asks to speak with a human or schedule an appointment, confirm their request and say our team will follow up promptly.`;
+  const systemInstructions = `You are the live conversational telephone AI assistant for ${businessName}.
+Services offered: ${servicesList}.
+Speaking Tone: ${businessTone}.
+Our operating hours: Monday through Friday from 9:00 AM to 6:00 PM, and Saturday from 10:00 AM to 4:00 PM.
+
+CRITICAL TELEPHONE CONVERSATION RULES:
+1. You are actively conversing on a live telephone call. Speak naturally, warmly, and concisely (1 to 2 sentences max).
+2. NEVER use markdown, bullet points, asterisks, brackets, URLs, or placeholders.
+3. If the caller provides or asks about timings:
+   - Confirm their preferred time warmly (e.g. "Tomorrow at 3 PM works perfectly for us.").
+   - Explicitly confirm that you are scheduling a Google Calendar reminder for that date and time.
+   - Ask if they have any questions regarding the service or procedure.
+4. DO NOT prematurely end the call! Keep conversing and answering questions.
+5. ONLY end the call when the caller explicitly says goodbye or indicates they are completely done (e.g., "bye", "goodbye", "that is all, thank you", "have a good day").
+6. When the caller says goodbye, deliver a warm closing farewell and append [END_CALL].`;
 
   try {
     const { text } = await generateText({
       model,
       system: systemInstructions,
-      prompt: `CONVERSATION TRANSCRIPT SO FAR:\n${historyText}\n\nCustomer just said: "${customerSpeech}"\n\nGenerate your spoken response now:`,
+      prompt: `CONVERSATION TRANSCRIPT SO FAR:\n${historyText}\n\nCustomer just said: "${customerSpeech}"\n\nGenerate your concise, helpful spoken response now:`,
     });
 
     let cleaned = text.trim();
@@ -344,28 +355,21 @@ CRITICAL SPOKEN VOICE GUIDELINES:
       cleaned = cleaned.replace(/\[END_CALL\]/g, '').trim();
     }
 
-    const lowerSpeech = customerSpeech.toLowerCase();
-    if (
-      lowerSpeech.includes('bye') ||
-      lowerSpeech.includes('goodbye') ||
-      lowerSpeech.includes('have a good day') ||
-      lowerSpeech.includes('hang up') ||
-      lowerSpeech.includes('that is all') ||
-      lowerSpeech.includes("that's all")
-    ) {
+    // Only close if caller explicitly says goodbye or AI concluded
+    if (/\b(goodbye|bye\s+now|see\s+you|have\s+a\s+good\s+day|have\s+a\s+nice\s+day)\b/i.test(customerSpeech)) {
       isClosing = true;
     }
 
     if (!cleaned) {
-      cleaned = `Thank you for sharing that with us at ${businessName}. How else may I assist you today?`;
+      cleaned = `Thank you. I have noted that for ${businessName}. Does that timing work well, or would you like to explore other options?`;
     }
 
     return { replyText: cleaned, isClosing };
   } catch (err: unknown) {
     console.error('[VoiceSession] generateAiVoiceReply error:', err);
     return {
-      replyText: `Thank you for contacting ${businessName}. I have noted your details and our team will follow up with you right away. Have a wonderful day!`,
-      isClosing: true,
+      replyText: `I have noted that for your appointment with ${businessName}. I will ensure your Google Calendar reminder is set for that time. Is there anything else you need?`,
+      isClosing: false,
     };
   }
 }
