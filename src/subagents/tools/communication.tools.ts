@@ -11,7 +11,6 @@ import { getTwilioClient } from './twilio-client.js';
 import { normalizePhone, formatSpokenVoiceScript } from '../utils/phone-parser.js';
 import {
   generateGatherTwiML,
-  generateElevenLabsAudioBuffer,
   getPublicBackendUrl,
   upsertCallSession,
   type CallSession,
@@ -98,31 +97,11 @@ export function createCommunicationTools(keys: TenantKeys) {
           const turnUrl = `${publicBase}/api/voice/webhook/turn?voice=${encodeURIComponent(selectedVoice)}&direction=outbound`;
           const statusUrl = `${publicBase}/api/voice/webhook/status`;
 
-          let initialAudioUrl: string | null = null;
-          if (keys.useElevenLabs && (keys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY)) {
-            try {
-              const elRes = await generateElevenLabsAudioBuffer({
-                text: sanitizedMessage,
-                voiceId: keys.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM',
-                apiKey: keys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY,
-                modelId: keys.elevenLabsModel || 'eleven_turbo_v2_5',
-                stability: keys.elevenLabsStability,
-                similarityBoost: keys.elevenLabsSimilarity,
-              });
-              if (elRes) {
-                initialAudioUrl = `${publicBase}/api/voice/elevenlabs/audio/${elRes.cacheId}.mp3`;
-              }
-            } catch (e) {
-              console.warn('[ElevenLabs initial speech generation failed, using Polly]', e);
-            }
-          }
-
           const conversationalTwiML = generateGatherTwiML({
             speech: sanitizedMessage,
             voice: selectedVoice,
             turnUrl,
             isEnding: false,
-            audioUrl: initialAudioUrl,
           });
 
           const call = await client.calls.create({

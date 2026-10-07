@@ -211,28 +211,23 @@ export function escapeXmlText(unsafe: string): string {
 
 /**
  * Generate interactive TwiML response with <Gather input="speech">
- * Supports both ElevenLabs audio layer (<Play>) and Twilio native speech (<Say>)
+ * Twilio native Amazon Polly Neural voice layer (<Say voice="...">)
  */
 export function generateGatherTwiML(options: {
   speech: string;
-  voice: string;
+  voice?: string;
   turnUrl: string;
   isEnding?: boolean;
   audioUrl?: string | null;
 }): string {
-  const { speech, voice, turnUrl, isEnding, audioUrl } = options;
+  const { speech, voice, turnUrl, isEnding } = options;
   const escapedSpeech = escapeXmlText(speech);
   const escapedVoice = escapeXml(voice || 'Polly.Joanna-Neural');
-
-  // If ElevenLabs audio URL is provided, Twilio <Play> executes the ElevenLabs voice layer
-  const speechNode = audioUrl
-    ? `<Play>${escapeXml(audioUrl)}</Play>`
-    : `<Say voice="${escapedVoice}">${escapedSpeech}</Say>`;
 
   if (isEnding) {
     return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  ${speechNode}
+  <Say voice="${escapedVoice}">${escapedSpeech}</Say>
   <Hangup/>
 </Response>`;
   }
@@ -240,12 +235,12 @@ export function generateGatherTwiML(options: {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather input="speech" speechTimeout="auto" speechModel="phone_call" timeout="10" action="${escapeXml(turnUrl)}" method="POST">
-    ${speechNode}
+    <Say voice="${escapedVoice}">${escapedSpeech}</Say>
   </Gather>
   <Gather input="speech" speechTimeout="auto" speechModel="phone_call" timeout="8" action="${escapeXml(turnUrl)}" method="POST">
     <Say voice="${escapedVoice}">I am still on the line. Could you let me know if those timings work for you, or if you have any questions?</Say>
   </Gather>
-  <Say voice="${escapedVoice}">Thank you for connecting with ${escapeXml(options.speech ? '' : 'us')}. We will follow up with you shortly. Have a wonderful day!</Say>
+  <Say voice="${escapedVoice}">Thank you for connecting with us. We will follow up with you shortly. Have a wonderful day!</Say>
   <Hangup/>
 </Response>`;
 }
@@ -255,18 +250,15 @@ export function generateGatherTwiML(options: {
  */
 export function generateClosingTwiML(options: {
   speech: string;
-  voice: string;
+  voice?: string;
   audioUrl?: string | null;
 }): string {
   const escapedSpeech = escapeXmlText(options.speech);
   const escapedVoice = escapeXml(options.voice || 'Polly.Joanna-Neural');
-  const speechNode = options.audioUrl
-    ? `<Play>${escapeXml(options.audioUrl)}</Play>`
-    : `<Say voice="${escapedVoice}">${escapedSpeech}</Say>`;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  ${speechNode}
+  <Say voice="${escapedVoice}">${escapedSpeech}</Say>
   <Hangup/>
 </Response>`;
 }

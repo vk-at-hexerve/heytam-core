@@ -208,11 +208,22 @@ const callingCommonFields: ConfigField[] = [
   { key: 'timezone', label: 'Timezone', type: 'text', placeholder: 'America/New_York' },
 ];
 
+const callingVoiceLayerFields: ConfigField[] = [
+  {
+    key: 'twilioVoice',
+    label: 'Twilio Voice Persona Layer',
+    type: 'select',
+    options: TWILIO_VOICE_PACKS,
+    required: true,
+    helpText: 'High-fidelity Amazon Polly Neural voice persona (e.g. Polly.Joanna-Neural). Directly executed in Twilio TwiML with zero external voice fetch latency.',
+  },
+];
+
 const callingConfigSections: ToolConfigSection[] = [
   {
-    sectionKey: 'elevenlabs_voice_layer',
-    sectionLabel: '✨ ElevenLabs AI Voice Layer (Human-Grade Speech)',
-    fields: elevenLabsVoiceFields,
+    sectionKey: 'twilio_voice_layer',
+    sectionLabel: '🎙️ Twilio Neural Voice Layer (Amazon Polly Neural)',
+    fields: callingVoiceLayerFields,
   },
   {
     sectionKey: 'provider_creds',

@@ -2298,33 +2298,12 @@ app.all(['/api/voice/webhook/turn', '/api/voice/webhook/turns'], async (req: Req
         voice: targetVoice,
       });
 
-      // Synthesize ElevenLabs voice layer audio if enabled
-      let audioUrl: string | null = null;
-      if (bizKeys.useElevenLabs && (bizKeys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY)) {
-        try {
-          const elRes = await generateElevenLabsAudioBuffer({
-            text: replyText,
-            voiceId: bizKeys.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM',
-            apiKey: bizKeys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY,
-            modelId: bizKeys.elevenLabsModel || 'eleven_turbo_v2_5',
-            stability: bizKeys.elevenLabsStability,
-            similarityBoost: bizKeys.elevenLabsSimilarity,
-          });
-          if (elRes) {
-            audioUrl = `${publicBase}/api/voice/elevenlabs/audio/${elRes.cacheId}.mp3`;
-          }
-        } catch (e) {
-          console.warn('[ElevenLabs Audio Generation Error, falling back to Polly]', e);
-        }
-      }
-
       // Stream AI response directly to HeyTam Orchestrator
-      const voiceLabel = audioUrl ? `ElevenLabs: ${bizKeys.elevenLabsVoiceId || 'Rachel'}` : targetVoice;
-      const aiLog = `[${aiTimestamp}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🤖 AI (${voiceLabel}): "${replyText}"`;
+      const aiLog = `[${aiTimestamp}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🤖 AI (${targetVoice}): "${replyText}"`;
       console.log(`[Twilio Webhook] ${aiLog}`);
       logToOrchestrator(runId, aiLog, {
         aiReply: replyText,
-        voice: voiceLabel,
+        voice: targetVoice,
         callSid,
       });
 
@@ -2337,7 +2316,7 @@ app.all(['/api/voice/webhook/turn', '/api/voice/webhook/turns'], async (req: Req
         session.endedAt = new Date().toISOString();
         savePersistentStores();
 
-        const closingTwiML = generateClosingTwiML({ speech: replyText, voice: targetVoice, audioUrl });
+        const closingTwiML = generateClosingTwiML({ speech: replyText, voice: targetVoice });
         return res.type('text/xml').send(closingTwiML);
       }
 
@@ -2348,7 +2327,6 @@ app.all(['/api/voice/webhook/turn', '/api/voice/webhook/turns'], async (req: Req
         voice: targetVoice,
         turnUrl,
         isEnding: false,
-        audioUrl,
       });
       return res.type('text/xml').send(nextTwiML);
     }
@@ -2368,25 +2346,11 @@ app.all(['/api/voice/webhook/turn', '/api/voice/webhook/turns'], async (req: Req
         `[${new Date().toISOString()}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🤖 AI (${targetVoice}): "${promptRepeat}"`
       );
 
-      let repeatAudioUrl: string | null = null;
-      if (bizKeys.useElevenLabs && (bizKeys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY)) {
-        const elRes = await generateElevenLabsAudioBuffer({
-          text: promptRepeat,
-          voiceId: bizKeys.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM',
-          apiKey: bizKeys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY,
-          modelId: bizKeys.elevenLabsModel || 'eleven_turbo_v2_5',
-        });
-        if (elRes) {
-          repeatAudioUrl = `${publicBase}/api/voice/elevenlabs/audio/${elRes.cacheId}.mp3`;
-        }
-      }
-
       const repeatTwiML = generateGatherTwiML({
         speech: promptRepeat,
         voice: targetVoice,
         turnUrl,
         isEnding: false,
-        audioUrl: repeatAudioUrl,
       });
       return res.type('text/xml').send(repeatTwiML);
     } else {
@@ -2399,20 +2363,7 @@ app.all(['/api/voice/webhook/turn', '/api/voice/webhook/turns'], async (req: Req
         `[${new Date().toISOString()}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🏁 Call ended due to inactivity.`
       );
 
-      let closeAudioUrl: string | null = null;
-      if (bizKeys.useElevenLabs && (bizKeys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY)) {
-        const elRes = await generateElevenLabsAudioBuffer({
-          text: farewell,
-          voiceId: bizKeys.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM',
-          apiKey: bizKeys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY,
-          modelId: bizKeys.elevenLabsModel || 'eleven_turbo_v2_5',
-        });
-        if (elRes) {
-          closeAudioUrl = `${publicBase}/api/voice/elevenlabs/audio/${elRes.cacheId}.mp3`;
-        }
-      }
-
-      const closeTwiML = generateClosingTwiML({ speech: farewell, voice: targetVoice, audioUrl: closeAudioUrl });
+      const closeTwiML = generateClosingTwiML({ speech: farewell, voice: targetVoice });
       return res.type('text/xml').send(closeTwiML);
     }
   } catch (err: unknown) {
@@ -2507,25 +2458,11 @@ app.all(['/api/voice/webhook/inbound', '/api/voice/inbound'], async (req: Reques
     const publicBase = getPublicBackendUrl();
     const turnUrl = `${publicBase}/api/voice/webhook/turn?businessId=${encodeURIComponent(businessId)}&runId=${encodeURIComponent(runId)}&voice=${encodeURIComponent(targetVoice)}&direction=inbound`;
 
-    let inboundAudioUrl: string | null = null;
-    if (bizKeys.useElevenLabs && (bizKeys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY)) {
-      const elRes = await generateElevenLabsAudioBuffer({
-        text: greetingText,
-        voiceId: bizKeys.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM',
-        apiKey: bizKeys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY,
-        modelId: bizKeys.elevenLabsModel || 'eleven_turbo_v2_5',
-      });
-      if (elRes) {
-        inboundAudioUrl = `${publicBase}/api/voice/elevenlabs/audio/${elRes.cacheId}.mp3`;
-      }
-    }
-
     const twiml = generateGatherTwiML({
       speech: greetingText,
       voice: targetVoice,
       turnUrl,
       isEnding: false,
-      audioUrl: inboundAudioUrl,
     });
 
     res.type('text/xml').send(twiml);
