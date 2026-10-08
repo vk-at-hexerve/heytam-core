@@ -13,7 +13,8 @@ import { checkAgentCredentials } from './credential-checker.js';
 import { PhiTokenVault } from '../../mastra/utils/phi-scrubber.js';
 import { normalizeTenantId, assertTenantAccess } from '../../mastra/utils/tenant-access.js';
 import type { TenantKeys, AgentResult } from '../schema.js';
-import { extractPhoneNumbers } from '../utils/phone-parser.js';
+import { extractPhoneNumbers, normalizePhone } from '../utils/phone-parser.js';
+import { google } from 'googleapis';
 import crypto from 'crypto';
 
 export interface DispatchOptions {
@@ -81,23 +82,31 @@ export async function dispatchWorkflow(options: DispatchOptions): Promise<Orches
   // The PHI scrubber replaces emails, phone numbers, and names with tokens.
   // We must extract this data first and explicitly re-inject it into the agent input.
   const senderEmail = (tenantKeys.smtpUser || '').toLowerCase();
+  const registeredBizEmail = tenantKeys.businessEmail || tenantKeys.smtpUser || 'shivamawasthi1129@gmail.com';
+  const wantsMyEmail = /my\s+email|to\s+me|send\s+it\s+to\s+my|send\s+to\s+my/i.test(prompt);
 
   // 1. Recipient email — check explicit 'to/send to' patterns first, then triggerData, then non-owner emails
   const explicitToMatch = prompt.match(/(?:to\s+(?:this\s+)?email|send\s+to|recipient|client|customer|to\s*[:–\-])\s*[:–\-]?\s*["']?([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})["']?/i);
   const myEmailMatch = prompt.match(/my\s+email\s+is\s*["']?([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})["']?/i);
   const allEmails = [...prompt.matchAll(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g)]
-    .map(m => m[0])
-    .filter(e => e.toLowerCase() !== senderEmail && (!myEmailMatch || e.toLowerCase() !== myEmailMatch[1].toLowerCase()));
+    .map(m => m[0]);
 
-  const recipientEmail = explicitToMatch?.[1] ||
-    ((triggerData?.recipientEmail && triggerData.recipientEmail.toLowerCase() !== senderEmail)
-      ? triggerData.recipientEmail
-      : (allEmails[0] || null));
-  const userCalendarEmail = myEmailMatch?.[1] || null;
+  let recipientEmail: string | null = null;
+  if (wantsMyEmail) {
+    recipientEmail = registeredBizEmail;
+  } else if (explicitToMatch?.[1]) {
+    recipientEmail = explicitToMatch[1];
+  } else if (triggerData?.recipientEmail) {
+    recipientEmail = triggerData.recipientEmail;
+  } else {
+    const nonSender = allEmails.filter(e => e.toLowerCase() !== senderEmail && (!myEmailMatch || e.toLowerCase() !== myEmailMatch[1].toLowerCase()));
+    recipientEmail = nonSender[0] || (myEmailMatch ? myEmailMatch[1] : allEmails[0]) || null;
+  }
+  const userCalendarEmail = myEmailMatch?.[1] || (wantsMyEmail ? registeredBizEmail : null);
 
   // 2. Recipient Name
   const nameMatch = prompt.match(/(?:hi|hello|dear|name\s*[:–\-])\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)/i);
-  const recipientName = triggerData?.recipientName 
+  let recipientName = triggerData?.recipientName 
     || nameMatch?.[1]?.trim() 
     || (recipientEmail ? recipientEmail.split('@')[0] : null);
 
@@ -105,12 +114,12 @@ export async function dispatchWorkflow(options: DispatchOptions): Promise<Orches
   const subjectMatch = prompt.match(/subject\s*[:–\-]\s*(.+?)(?:\n|\s*,?\s*(?:email|body|message)\s*[:–\-]|,\s*and|$)/i);
   const subjectLine = triggerData?.subject || subjectMatch?.[1]?.trim() || null;
 
-  // 4. Email body — check triggerData, then search prompt
-  const bodyMatch = prompt.match(/(?:email|body|message)\s*[:–\-]\s*([\s\S]+?)(?:\s+and\s+set|\s+set\s+the|===|$)/i);
+  // 4. Email body — ONLY set if explicitly pre-written in triggerData or explicitly quoted in prompt
+  const quotedBodyMatch = prompt.match(/(?:body|message|content)\s*[:–\-]\s*["']([\s\S]+?)["']/i);
   const hasCustomMessage = triggerData?.message && triggerData.message !== 'Hi from HeyTam — your AI workforce.';
   const emailBody = hasCustomMessage
     ? triggerData.message
-    : (bodyMatch?.[1]?.trim() || triggerData?.notes || null);
+    : (quotedBodyMatch?.[1]?.trim() || null);
 
   // 5. Phone numbers (with international E.164 and multiple phone support)
   const allExtractedPhones = extractPhoneNumbers(prompt, tenantKeys?.twilioFromPhone);
@@ -118,33 +127,161 @@ export async function dispatchWorkflow(options: DispatchOptions): Promise<Orches
     ? triggerData.recipientPhones
     : (triggerData?.recipientPhone ? [triggerData.recipientPhone] : []);
   const combinedPhones = Array.from(new Set([...allExtractedPhones, ...triggerPhones]));
-  const primaryPhone = combinedPhones[0] || null;
+  let primaryPhone = combinedPhones[0] || null;
 
   // 6. Live Google Sheet / Spreadsheet Ingestion
-  const sheetMatch = prompt.match(/https:\/\/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  let rawSheetSource = prompt.match(/https:\/\/docs\.google\.com\/spreadsheets\/d\/[^\s\n"'>]+/)?.[0]
+    || triggerData?.googleSheetId
+    || tenantKeys?.googleSheetId;
+
+  let sheetId: string | null = null;
+  let sheetGid: string | null = null;
   let sheetCsvData: string | null = null;
   let sheetUrl: string | null = null;
-  if (sheetMatch) {
-    sheetUrl = sheetMatch[0];
-    const sheetId = sheetMatch[1];
-    try {
-      const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
-      console.log(`[Dispatcher] 📊 Detected Google Sheet. Fetching live data from: ${csvUrl}`);
-      const resp = await fetch(csvUrl, { redirect: 'follow' });
-      if (resp.ok) {
-        sheetCsvData = await resp.text();
-        console.log(`[Dispatcher] ✅ Successfully fetched ${sheetCsvData.length} bytes of live spreadsheet data.`);
-      } else {
-        console.warn(`[Dispatcher] ⚠️ Google Sheet fetch returned status ${resp.status}`);
+  let clientEmail: string | null = null;
+
+  if (rawSheetSource) {
+    const rawTrimmed = String(rawSheetSource).trim();
+    const idMatch = rawTrimmed.match(/spreadsheets\/d\/([a-zA-Z0-9-_]+)/i);
+    sheetId = idMatch ? idMatch[1] : (rawTrimmed.startsWith('http') ? null : rawTrimmed);
+    const gidMatch = rawTrimmed.match(/[?&#]gid=([0-9]+)/i);
+    sheetGid = gidMatch ? gidMatch[1] : null;
+
+    if (sheetId) {
+      sheetUrl = `https://docs.google.com/spreadsheets/d/${sheetId}${sheetGid ? `?gid=${sheetGid}` : ''}`;
+
+      // 1. Try Google Sheets API with OAuth if available
+      if (tenantKeys?.googleRefreshToken || tenantKeys?.googleAccessToken) {
+        try {
+          const oauth2Client = new google.auth.OAuth2(
+            tenantKeys.googleClientId || process.env.GOOGLE_CLIENT_ID,
+            tenantKeys.googleClientSecret || process.env.GOOGLE_CLIENT_SECRET
+          );
+          oauth2Client.setCredentials({
+            refresh_token: tenantKeys.googleRefreshToken,
+            access_token: tenantKeys.googleAccessToken,
+          });
+          const sheetsApi = google.sheets({ version: 'v4', auth: oauth2Client });
+          const range = tenantKeys.googleSheetRange || 'Sheet1!A1:Z100';
+          const { data } = await sheetsApi.spreadsheets.values.get({
+            spreadsheetId: sheetId,
+            range,
+          });
+          if (data.values && data.values.length > 0) {
+            const maxRows = Number(tenantKeys.maxLeadsPerRun) || 50;
+            sheetCsvData = data.values
+              .slice(0, maxRows)
+              .map((row: any[]) => row.map((cell: any) => `"${String(cell ?? '').replace(/"/g, '""')}"`).join(','))
+              .join('\n');
+            console.log(`[Dispatcher] ✅ Successfully fetched ${data.values.length} rows via Google Sheets API v4.`);
+          }
+        } catch (apiErr: any) {
+          console.warn('[Dispatcher] ⚠️ Google Sheets API fetch failed, trying public CSV export:', apiErr.message);
+        }
       }
-    } catch (sheetErr) {
-      console.error('[Dispatcher] ❌ Error fetching Google Sheet CSV:', sheetErr);
+
+      // 2. Fall back to public CSV export if not already loaded
+      if (!sheetCsvData) {
+        try {
+          const csvUrl = sheetGid
+            ? `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${sheetGid}`
+            : `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
+          console.log(`[Dispatcher] 📊 Fetching spreadsheet data from: ${csvUrl}`);
+          const resp = await fetch(csvUrl, { redirect: 'follow' });
+          if (resp.ok) {
+            sheetCsvData = await resp.text();
+            console.log(`[Dispatcher] ✅ Successfully fetched ${sheetCsvData.length} bytes of live spreadsheet data.`);
+          } else {
+            console.warn(`[Dispatcher] ⚠️ Google Sheet CSV export returned status ${resp.status}`);
+          }
+        } catch (sheetErr) {
+          console.error('[Dispatcher] ❌ Error fetching Google Sheet CSV:', sheetErr);
+        }
+      }
+    }
+  }
+
+  // 7. Resolve specific lead data from loaded Google Sheet (e.g. Abhishek Sharma)
+  if (sheetCsvData) {
+    const leadQueryMatch = prompt.match(/(?:lead\s+of|lead\s+for|lead\s+named?|person|contact|client)\s+([A-Za-z\s]+?)(?:and|\s+then|\s+on|\s+to|,|\.|$)/i);
+    const leadQuery = leadQueryMatch ? leadQueryMatch[1].trim().toLowerCase() : null;
+    const queryTokens = leadQuery ? leadQuery.split(/\s+/).filter(w => w.length >= 3) : [];
+
+    const parseCsvLine = (line: string): string[] => {
+      const res: string[] = [];
+      let cur = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const c = line[i];
+        if (c === '"') inQuotes = !inQuotes;
+        else if (c === ',' && !inQuotes) { res.push(cur.trim()); cur = ''; }
+        else cur += c;
+      }
+      res.push(cur.trim());
+      return res;
+    };
+
+    const lines = sheetCsvData.split(/\r?\n/).filter(Boolean);
+    if (lines.length > 1) {
+      const headers = parseCsvLine(lines[0]);
+      const getVal = (vals: string[], colNames: string[]): string => {
+        for (const name of colNames) {
+          const idx = headers.findIndex(h => h.toLowerCase().includes(name.toLowerCase()));
+          if (idx !== -1 && vals[idx]) return vals[idx].replace(/^"|"$/g, '').trim();
+        }
+        return '';
+      };
+
+      let matchedVals: string[] | null = null;
+      if (queryTokens.length > 0) {
+        for (let i = 1; i < lines.length; i++) {
+          const vals = parseCsvLine(lines[i]);
+          const rowText = vals.join(' ').toLowerCase();
+          // Match if all search tokens (or the full query) appear in this row
+          if (queryTokens.every(tok => rowText.includes(tok)) || (leadQuery && rowText.includes(leadQuery))) {
+            matchedVals = vals;
+            break;
+          }
+        }
+      } else if (!primaryPhone) {
+        matchedVals = parseCsvLine(lines[1]);
+      }
+
+      if (matchedVals) {
+        const foundFirst = getVal(matchedVals, ['First Name']);
+        const foundLast = getVal(matchedVals, ['Last Name']);
+        const foundName = `${foundFirst} ${foundLast}`.trim() || getVal(matchedVals, ['Name', 'Client', 'Patient']);
+        const foundEmail = getVal(matchedVals, ['Email']);
+        const foundPhone = getVal(matchedVals, ['Phone Number', 'Phone', 'Mobile']);
+
+        if (foundName && (!recipientName || recipientName === 'User' || recipientName.includes('@'))) {
+          recipientName = foundName;
+        }
+        if (foundEmail) {
+          clientEmail = foundEmail;
+          if (!recipientEmail || wantsMyEmail) {
+            // Keep both
+            recipientEmail = wantsMyEmail ? registeredBizEmail : foundEmail;
+          }
+        }
+        if (foundPhone) {
+          const norm = normalizePhone(foundPhone);
+          if (norm) {
+            primaryPhone = norm;
+            if (!combinedPhones.includes(norm)) {
+              combinedPhones.unshift(norm);
+            }
+          }
+        }
+        console.log(`[Dispatcher] 🎯 Resolved lead from sheet: Name="${foundName}", Phone="${foundPhone}", Email="${foundEmail}"`);
+      }
     }
   }
 
   // Build an explicit intent block that will survive PHI scrubbing
   const intentBlock = [
     recipientEmail      ? `RECIPIENT_EMAIL: ${recipientEmail}` : '',
+    clientEmail         ? `CLIENT_EMAIL: ${clientEmail}` : '',
     userCalendarEmail   ? `CALENDAR_OWNER_EMAIL: ${userCalendarEmail}` : '',
     recipientName       ? `RECIPIENT_NAME: ${recipientName}` : '',
     combinedPhones.length > 1 ? `RECIPIENT_PHONES: ${combinedPhones.join(', ')}` : '',

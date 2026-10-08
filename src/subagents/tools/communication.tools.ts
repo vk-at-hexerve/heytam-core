@@ -11,6 +11,7 @@ import { getTwilioClient } from './twilio-client.js';
 import { normalizePhone, formatSpokenVoiceScript } from '../utils/phone-parser.js';
 import {
   generateGatherTwiML,
+  generateElevenLabsAudioBuffer,
   getPublicBackendUrl,
   upsertCallSession,
   type CallSession,
@@ -83,7 +84,7 @@ export function createCommunicationTools(keys: TenantKeys) {
       inputSchema: z.object({
         to: z.string().describe('E.164 phone number to call.'),
         message: z.string().describe('Spoken message to deliver via Twilio TTS.'),
-        voice: z.string().optional().describe('Twilio voice pack (e.g. Polly.Joanna-Neural, Polly.Matthew-Neural).'),
+        voice: z.string().optional().describe('ElevenLabs voice persona ID (e.g. 21m00Tcm4TlvDq8ikWAM).'),
       }),
       execute: async ({ to, message, voice }: { to: string; message: string; voice?: string }) => {
         if (!hasTwilioCreds)
@@ -92,16 +93,35 @@ export function createCommunicationTools(keys: TenantKeys) {
           const client = await getTwilioClient(keys);
           const cleanTo = normalizePhone(to) || to;
           const sanitizedMessage = formatSpokenVoiceScript(message);
-          const selectedVoice = voice || keys.twilioVoice || 'Polly.Joanna-Neural';
+          const selectedVoice = voice || keys.elevenLabsVoiceId || keys.twilioVoice || '21m00Tcm4TlvDq8ikWAM';
           const publicBase = getPublicBackendUrl();
           const turnUrl = `${publicBase}/api/voice/webhook/turn?voice=${encodeURIComponent(selectedVoice)}&direction=outbound`;
           const statusUrl = `${publicBase}/api/voice/webhook/status`;
+
+          let audioUrl: string | null = null;
+          const useElevenLabs = keys.useElevenLabs || Boolean(keys.elevenLabsApiKey);
+          if (useElevenLabs && keys.elevenLabsApiKey) {
+            try {
+              const elAudio = await generateElevenLabsAudioBuffer({
+                text: sanitizedMessage,
+                voiceId: keys.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM',
+                apiKey: keys.elevenLabsApiKey,
+                modelId: keys.elevenLabsModel || 'eleven_turbo_v2_5',
+                stability: keys.elevenLabsStability,
+                similarityBoost: keys.elevenLabsSimilarity,
+              });
+              if (elAudio?.cacheId) {
+                audioUrl = `${publicBase}/api/voice/elevenlabs/audio/${elAudio.cacheId}.mp3`;
+              }
+            } catch {}
+          }
 
           const conversationalTwiML = generateGatherTwiML({
             speech: sanitizedMessage,
             voice: selectedVoice,
             turnUrl,
             isEnding: false,
+            audioUrl,
           });
 
           const call = await client.calls.create({

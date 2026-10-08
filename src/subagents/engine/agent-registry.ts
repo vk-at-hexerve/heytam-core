@@ -268,6 +268,32 @@ TELEPHONE CALL SCRIPT RULES (MANDATORY):
 - NEVER speak, recite, or repeat any phone numbers or digits! The person answering already knows their phone number. Do not read their phone number to them.
 - Keep the script clear, polite, concise, and natural for telephone speech.`;
   }
+  let emailDirectives = '';
+  const EMAIL_AGENTS = new Set([
+    'follow-up-agent', 'communication-agent', 'campaign-agent',
+    'review-agent', 'reactivation-agent', 'referral-agent',
+    'lead-recovery-agent', 'cancellation-recovery-agent', 'membership-agent',
+    'upsell-agent', 'revenue-recovery-agent', 'patient-concierge',
+    'post-treatment-agent', 'front-desk-copilot', 'no-show-prevention-agent',
+  ]);
+  if (EMAIL_AGENTS.has(agentId)) {
+    emailDirectives = `
+EMAIL COMPOSITION RULES (MANDATORY):
+- 'messageToUser' is the ACTUAL COMPLETE EMAIL BODY that will be sent via SMTP directly to the recipient/customer!
+- Write directly to the customer/client from the perspective of the business ([Business Name]).
+- NEVER echo, quote, or regurgitate the user's prompt or operational instructions (e.g. NEVER include text like "can u please send an email to...", "in that email add all our...", or "I will send an email"). The user is your business owner/operator giving you instructions; do NOT send their raw prompt to the customer!
+- Actively FULFILL the user's request using the BUSINESS CONTEXT:
+  * If requested to include appointment timings: state our operating and available appointment timings from the BUSINESS CONTEXT (e.g. Monday - Friday 9:00 AM to 6:00 PM, Saturday 10:00 AM to 4:00 PM) clearly in a neat, well-organized section.
+  * If requested to include services offered: list the business's actual available services from the BUSINESS CONTEXT with clean bullet points.
+  * If requested to follow up, confirm, re-engage, or offer promotions: write a warm, engaging, and professional email tailored to the recipient.
+- Structure the email elegantly:
+  1. Warm, professional greeting (e.g., "Dear Valued Client," or "Hello [Name],")
+  2. Clear, polite opening stating the purpose of the email on behalf of [Business Name]
+  3. Clearly organized sections or bullet points for services, hours, or requested information
+  4. A clear call to action (e.g. how to schedule, reply, or get in touch)
+  5. Warm, professional sign-off (e.g., "Warm regards,\\nThe Team at [Business Name]")
+- Use clean line breaks. Do NOT use markdown code blocks or raw JSON in messageToUser.`;
+  }
 
   return `You are the ${name} — ${role} — for the following business:
 ---
@@ -277,6 +303,7 @@ ${tenantContext}
 
 YOUR ROLE: ${desc}
 ${voiceDirectives}
+${emailDirectives}
 
 CORE DIRECTIVES:
 1. Autonomous Workforce: You ARE the automated AI operations engine for this business. When asked to process emails, schedule appointments, or draft feedback, execute the task directly. Never refuse or tell the user to contact administrative staff, because you are that automation.

@@ -54,7 +54,10 @@ export const HeavyDutyAgentSchema = z.object({
       service: z.string().nullable().describe('Requested service or treatment, or null if not mentioned.'),
       preferredDate: z.string().nullable().describe('Requested date, time, or appointment slot, or null if not mentioned.'),
       budget: z.string().nullable().describe('Stated budget or price inquiry, or null if not mentioned.'),
+      subject: z.string().nullable().describe('Recommended or specified email subject line, or null if not applicable.'),
       summary: z.string().nullable().describe('Brief summary of intent or notes, or null if not mentioned.'),
+      leadsCount: z.number().nullable().describe('Total count of leads fetched or ingested, or null.'),
+      leadSource: z.string().nullable().describe('Source of ingested leads (e.g. Google Sheet, CRM, Database), or null.'),
     })
     .describe('Structured data captured from the conversation.'),
   delegation: z
@@ -105,8 +108,18 @@ export interface TenantKeys {
   googleRefreshToken?: string;
   googleAccessToken?: string;
   googleCalendarId?: string;
-  // CRM
+  googleServiceAccountEmail?: string;
+  googleServiceAccountPrivateKey?: string;
+  googleServiceAccountJson?: string;
+  // CRM & Lead Sources
   googleSheetId?: string;
+  googleSheetRange?: string;
+  leadSourceType?: string;
+  ghlApiKey?: string;
+  ghlLocationId?: string;
+  hubspotApiKey?: string;
+  leadFilterStatus?: string;
+  maxLeadsPerRun?: number;
   mongoUri?: string;
   mongoDatabase?: string;
   // ElevenLabs Voice Layer (AI Human Speech)
@@ -116,5 +129,6 @@ export interface TenantKeys {
   elevenLabsStability?: number;
   elevenLabsSimilarity?: number;
   useElevenLabs?: boolean;
+  businessEmail?: string;
 }
 

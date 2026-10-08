@@ -70,9 +70,19 @@ export function extractPhoneNumbers(text: string, excludePhone?: string): string
     }
   }
 
+  // If explicit recipient phones were supplied in headers, honor ONLY those
+  if (found.length > 0) {
+    return found;
+  }
+
   // 2. Extract international format (+countrycode...) and standard numbers from entire text
+  // Strip URLs and URL parameters (e.g. gid=1411518912) so query params and sheet IDs are never mistaken for phone numbers
+  const cleanedText = text
+    .replace(/https?:\/\/[^\s"'<>]+/gi, ' ')
+    .replace(/[?&#][a-zA-Z0-9_-]+=\d+/gi, ' ');
+
   const regex = /(?:\+|00)?(?:[1-9]\d{0,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,9}/g;
-  const matches = text.match(regex) || [];
+  const matches = cleanedText.match(regex) || [];
 
   for (const m of matches) {
     const raw = m.trim();

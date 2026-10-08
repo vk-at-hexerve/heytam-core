@@ -46,6 +46,8 @@ export interface SuggestWorkflowOptions {
   subscribedToolIds?: string[] | Set<string>;
   allAgentsSubscribed?: boolean;
   plan?: string;
+  businessEmail?: string;
+  businessName?: string;
 }
 
 // ─── Compatible Fallback Map ───────────────────────────────────────────────────
@@ -111,7 +113,12 @@ export function suggestWorkflow(prompt: string, options?: SuggestWorkflowOptions
   } else {
     const allEmails = [...prompt.matchAll(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g)].map(m => m[0]);
     const nonOwner = allEmails.filter(e => !myEmailMatch || e.toLowerCase() !== myEmailMatch[1].toLowerCase());
-    extractedEmail = nonOwner[0] || (myEmailMatch ? undefined : allEmails[0]);
+    extractedEmail = nonOwner[0] || (myEmailMatch ? myEmailMatch[1] : allEmails[0]);
+  }
+
+  // If user says "to my email", "send to my email", "to me", resolve to registered business email
+  if (!extractedEmail && (text.includes('my email') || text.includes('to me') || text.includes('send to my') || text.includes('send it to my'))) {
+    extractedEmail = options?.businessEmail || 'shivamawasthi1129@gmail.com';
   }
 
   const extractedPhones = extractPhoneNumbers(prompt);
@@ -147,7 +154,9 @@ export function suggestWorkflow(prompt: string, options?: SuggestWorkflowOptions
   const isCalendarIntent = text.includes('calender') || text.includes('calendar') || text.includes('remainder') || text.includes('reminder') || text.includes('appoint') || text.includes('schedule') || text.includes('booking');
   const isEmailSendIntent = (text.includes('send') || text.includes('dispatch') || text.includes('forward') || text.includes('deliver') || text.includes('email to') || text.includes('send to') || text.includes('send the data')) && (text.includes('email') || text.includes('mail') || text.includes('@')) && !text.includes('my email is');
 
-  if (isSheetIntent) {
+  const hasCallKeyword = text.includes('call') || text.includes('phone') || text.includes('dial') || text.includes('voice');
+
+  if (isSheetIntent && !hasCallKeyword) {
     if (isCalendarIntent && !isEmailSendIntent) {
       idealWorkflow = {
         name: 'Google Sheet Ingestion & Calendar Synchronization Flow',
@@ -173,7 +182,7 @@ export function suggestWorkflow(prompt: string, options?: SuggestWorkflowOptions
         ],
         extractedTriggerData: { ...defaultTriggerData, subject: extractedSubject || 'Google Sheet Appointments Sync & Report', service: 'Google Sheet Calendar Sync & Email Dispatch' },
       };
-    } else {
+    } else if (isEmailSendIntent) {
       idealWorkflow = {
         name: 'Google Sheet Ingestion & Email Dispatch Flow',
         description: `Reads live spreadsheet data from Google Sheets and dispatches the formatted dataset to ${extractedEmail || 'the recipient'}.`,
@@ -185,12 +194,24 @@ export function suggestWorkflow(prompt: string, options?: SuggestWorkflowOptions
         ],
         extractedTriggerData: { ...defaultTriggerData, subject: extractedSubject || 'Google Sheet Data Export & Leads Report', service: 'Google Sheet Ingestion & Data Dispatch' },
       };
+    } else {
+      idealWorkflow = {
+        name: 'Google Sheet Lead Ingestion Flow',
+        description: 'Reads and parses lead records directly from the specified Google Sheet.',
+        trigger: 'On-Demand Google Sheet Ingestion Trigger',
+        explanation: 'Lead Concierge extracts, validates, and parses the live data rows from the Google Sheet without unnecessary downstream agents.',
+        steps: [
+          { order: 1, agentId: 'lead-concierge', agentName: 'Lead Concierge & Sheet Ingestion' },
+        ],
+        extractedTriggerData: { ...defaultTriggerData, service: 'Google Sheet Lead Ingestion' },
+      };
     }
   }
 
   // 1. Inbound Email Reading + Rescheduling
   else if (
-    (text.includes('read') || text.includes('inbound') || text.includes('first 5') || text.includes('check email')) &&
+    !hasCallKeyword &&
+    (/\bread\s+email\b|\bread\s+inbox\b|\bread\s+mail\b|\binbound\b|\bcheck\s+email\b/i.test(prompt)) &&
     (text.includes('email') || text.includes('mail')) &&
     (text.includes('resched') || text.includes('calender') || text.includes('calendar') || text.includes('appoint'))
   ) {
@@ -225,27 +246,115 @@ export function suggestWorkflow(prompt: string, options?: SuggestWorkflowOptions
 
   // 3. Outbound Voice Calling
   else if (text.includes('call') || text.includes('phone') || text.includes('dial') || text.includes('voice')) {
-    const hasBookingIntent = /book|appoint|appoinm|reserv|schedul|calendar|calender|remaind|remind|slot|timing/i.test(prompt);
-    idealWorkflow = hasBookingIntent ? {
-      name: 'Voice Calling & Booking Flow',
-      description: 'Places outbound voice call via Twilio and confirms appointment.',
-      trigger: 'Outbound Telephony Trigger',
-      explanation: 'Voice Agent dials the contact via Twilio using natural speech synthesis. Booking Agent reserves the calendar appointment.',
-      steps: [
-        { order: 1, agentId: 'voice-agent', agentName: 'Voice Agent (Outbound Call)' },
-        { order: 2, agentId: 'booking-agent', agentName: 'Booking Agent (Calendar)' },
-      ],
-      extractedTriggerData: { ...defaultTriggerData, service: 'Outbound Voice Call & Booking' },
-    } : {
-      name: 'Outbound Voice Outreach Flow',
-      description: 'Places conversational AI voice call via Twilio and engages contact with real-time dialogue.',
-      trigger: 'Outbound Telephony Trigger',
-      explanation: 'Voice Agent dials the contact via Twilio with natural speech synthesis and real-time back-and-forth speech interaction.',
-      steps: [
-        { order: 1, agentId: 'voice-agent', agentName: 'Voice Agent (Outbound Call)' },
-      ],
-      extractedTriggerData: { ...defaultTriggerData, service: 'Outbound Voice Call' },
-    };
+    const hasLeadFetchIntent = /fetch.*lead|get.*lead|read.*lead|find.*lead|lead\s+of|search.*lead|lookup.*lead/i.test(prompt);
+    const hasEmailIntent = /email|mail|@|send.*confirmation/i.test(prompt);
+    const hasCalendarIntent = /calendar|calender|google cal|reserve slot/i.test(prompt);
+    const hasBookingIntent = /book|appoint|appoinm|reserv|schedul|slot|timing/i.test(prompt);
+
+    // If fetching lead from sheet/crm AND calling
+    if (hasLeadFetchIntent) {
+      if ((hasBookingIntent || hasCalendarIntent) && hasEmailIntent) {
+        idealWorkflow = {
+          name: 'Lead Fetching, Voice Calling, Booking & Email Flow',
+          description: 'Fetches lead record from Google Sheet/CRM, places outbound voice call to qualify and book appointment, and delivers email confirmation.',
+          trigger: 'Lead Retrieval, Outbound Voice & Multi-Channel Trigger',
+          explanation: '4-agent pipeline: Lead Concierge retrieves contact details for the specified lead from Google Sheets/CRM. Voice Agent calls the lead. Booking Agent schedules the appointment in Google Calendar. Follow-up Agent sends confirmation emails.',
+          steps: [
+            { order: 1, agentId: 'lead-concierge', agentName: 'Lead Concierge (Lead Retrieval & Sheet Data)' },
+            { order: 2, agentId: 'voice-agent', agentName: 'Voice Agent (Outbound Call)' },
+            { order: 3, agentId: 'booking-agent', agentName: 'Booking Agent (Calendar Booking)' },
+            { order: 4, agentId: 'follow-up-agent', agentName: 'Follow-up Agent (Email Confirmation)' },
+          ],
+          extractedTriggerData: { ...defaultTriggerData, service: 'Lead Retrieval, Voice Call & Confirmation' },
+        };
+      } else if (hasBookingIntent || hasCalendarIntent) {
+        idealWorkflow = {
+          name: 'Lead Fetching, Voice Calling & Booking Flow',
+          description: 'Fetches lead from Google Sheet/CRM, conducts outbound phone call, and books appointment.',
+          trigger: 'Lead Retrieval & Voice Booking Trigger',
+          explanation: '3-agent flow: Lead Concierge retrieves lead details, Voice Agent calls contact, and Booking Agent reserves the calendar appointment.',
+          steps: [
+            { order: 1, agentId: 'lead-concierge', agentName: 'Lead Concierge (Lead Retrieval)' },
+            { order: 2, agentId: 'voice-agent', agentName: 'Voice Agent (Outbound Call)' },
+            { order: 3, agentId: 'booking-agent', agentName: 'Booking Agent (Calendar Booking)' },
+          ],
+          extractedTriggerData: { ...defaultTriggerData, service: 'Lead Retrieval & Voice Booking' },
+        };
+      } else if (hasEmailIntent) {
+        idealWorkflow = {
+          name: 'Lead Fetching, Voice Calling & Email Follow-Up Flow',
+          description: 'Fetches lead from Google Sheet/CRM, places outbound call, and sends follow-up email.',
+          trigger: 'Lead Retrieval & Voice Outreach Trigger',
+          explanation: '3-agent flow: Lead Concierge retrieves contact record, Voice Agent calls contact, and Follow-up Agent delivers email confirmation.',
+          steps: [
+            { order: 1, agentId: 'lead-concierge', agentName: 'Lead Concierge (Lead Retrieval)' },
+            { order: 2, agentId: 'voice-agent', agentName: 'Voice Agent (Outbound Call)' },
+            { order: 3, agentId: 'follow-up-agent', agentName: 'Follow-up Agent (Email Confirmation)' },
+          ],
+          extractedTriggerData: { ...defaultTriggerData, service: 'Lead Retrieval, Voice Call & Email' },
+        };
+      } else {
+        idealWorkflow = {
+          name: 'Lead Fetching & Outbound Voice Calling Flow',
+          description: 'Fetches lead record from Google Sheet/CRM and initiates outbound call.',
+          trigger: 'Lead Retrieval & Call Trigger',
+          explanation: '2-agent flow: Lead Concierge retrieves lead data and Voice Agent places the outbound call.',
+          steps: [
+            { order: 1, agentId: 'lead-concierge', agentName: 'Lead Concierge (Lead Retrieval)' },
+            { order: 2, agentId: 'voice-agent', agentName: 'Voice Agent (Outbound Call)' },
+          ],
+          extractedTriggerData: { ...defaultTriggerData, service: 'Lead Retrieval & Outbound Call' },
+        };
+      }
+    } else if (hasEmailIntent && (hasCalendarIntent || hasBookingIntent)) {
+      idealWorkflow = {
+        name: 'Voice Calling, Booking & Email Confirmation Flow',
+        description: 'Places outbound voice call, reserves calendar appointment, and sends confirmation email.',
+        trigger: 'Outbound Voice, Booking & Email Trigger',
+        explanation: 'Voice Agent calls the recipient, Booking Agent schedules in Google Calendar, and Follow-up Agent sends confirmation emails.',
+        steps: [
+          { order: 1, agentId: 'voice-agent', agentName: 'Voice Agent (Outbound Call)' },
+          { order: 2, agentId: 'booking-agent', agentName: 'Booking Agent (Calendar)' },
+          { order: 3, agentId: 'follow-up-agent', agentName: 'Follow-up Agent (Email Confirmation)' },
+        ],
+        extractedTriggerData: { ...defaultTriggerData, service: 'Outbound Voice Call & Email Confirmation' },
+      };
+    } else if (hasEmailIntent) {
+      idealWorkflow = {
+        name: 'Voice Calling & Email Confirmation Flow',
+        description: 'Places outbound voice call and delivers appointment confirmation via email.',
+        trigger: 'Outbound Voice & Email Confirmation Trigger',
+        explanation: 'Voice Agent dials the contact with AI speech dialogue, and Follow-up Agent dispatches confirmation email.',
+        steps: [
+          { order: 1, agentId: 'voice-agent', agentName: 'Voice Agent (Outbound Call)' },
+          { order: 2, agentId: 'follow-up-agent', agentName: 'Follow-up Agent (Email Confirmation)' },
+        ],
+        extractedTriggerData: { ...defaultTriggerData, service: 'Outbound Voice Call & Email Confirmation' },
+      };
+    } else if (hasBookingIntent || hasCalendarIntent) {
+      idealWorkflow = {
+        name: 'Voice Calling & Booking Flow',
+        description: 'Places outbound voice call and confirms appointment.',
+        trigger: 'Outbound Telephony Trigger',
+        explanation: 'Voice Agent dials the contact with natural speech synthesis. Booking Agent reserves the calendar appointment.',
+        steps: [
+          { order: 1, agentId: 'voice-agent', agentName: 'Voice Agent (Outbound Call)' },
+          { order: 2, agentId: 'booking-agent', agentName: 'Booking Agent (Calendar)' },
+        ],
+        extractedTriggerData: { ...defaultTriggerData, service: 'Outbound Voice Call & Booking' },
+      };
+    } else {
+      idealWorkflow = {
+        name: 'Outbound Voice Outreach Flow',
+        description: 'Places conversational AI voice call and engages contact with real-time dialogue.',
+        trigger: 'Outbound Telephony Trigger',
+        explanation: 'Voice Agent dials the contact with natural speech synthesis and real-time back-and-forth speech interaction.',
+        steps: [
+          { order: 1, agentId: 'voice-agent', agentName: 'Voice Agent (Outbound Call)' },
+        ],
+        extractedTriggerData: { ...defaultTriggerData, service: 'Outbound Voice Call' },
+      };
+    }
   }
 
   // 4. WhatsApp Outreach
@@ -439,19 +548,79 @@ export function suggestWorkflow(prompt: string, options?: SuggestWorkflowOptions
     };
   }
 
-  // 17. New Lead Intake & Qualification
-  else if (text.includes('lead') || text.includes('qualif') || text.includes('intake') || text.includes('inquiry')) {
+  // 17a. Lead Retrieval / Fetching / Reading Only (NO booking agent unless requested)
+  else if (
+    (text.includes('lead') || text.includes('inquiry')) &&
+    (text.includes('fetch') || text.includes('read') || text.includes('get') || text.includes('list') || text.includes('pull') || text.includes('latest') || text.includes('show') || text.includes('recent')) &&
+    !text.includes('book') && !text.includes('schedul') && !text.includes('appoint') && !text.includes('calendar') && !text.includes('call')
+  ) {
+    const isQualify = text.includes('qualif') || text.includes('score') || text.includes('grade');
+    const isEmailDispatch = text.includes('email') || text.includes('mail') || text.includes('send') || text.includes('dispatch') || text.includes('forward');
+
+    const steps = isEmailDispatch
+      ? isQualify
+        ? [
+            { order: 1, agentId: 'lead-concierge', agentName: 'Lead Concierge (Lead Fetching & Ingestion)' },
+            { order: 2, agentId: 'lead-qualifier', agentName: 'Lead Qualifier' },
+            { order: 3, agentId: 'follow-up-agent', agentName: 'Follow-up Agent (Email Leads Report)' },
+          ]
+        : [
+            { order: 1, agentId: 'lead-concierge', agentName: 'Lead Concierge (Lead Fetching & Ingestion)' },
+            { order: 2, agentId: 'follow-up-agent', agentName: 'Follow-up Agent (Email Leads Report)' },
+          ]
+      : isQualify
+        ? [
+            { order: 1, agentId: 'lead-concierge', agentName: 'Lead Concierge' },
+            { order: 2, agentId: 'lead-qualifier', agentName: 'Lead Qualifier' },
+          ]
+        : [
+            { order: 1, agentId: 'lead-concierge', agentName: 'Lead Concierge' },
+          ];
+
     idealWorkflow = {
-      name: 'Lead Intake & Qualification Pipeline',
-      description: 'Captures incoming inquiries, qualifies budget and intent, and schedules consultations.',
+      name: isEmailDispatch ? 'Lead Retrieval & Email Dispatch Flow' : (isQualify ? 'Lead Retrieval & Qualification Flow' : 'Lead Fetching & Ingestion Flow'),
+      description: isEmailDispatch
+        ? `Retrieves latest leads and dispatches formatted report directly to ${extractedEmail || 'registered business email'}.`
+        : 'Retrieves and parses the latest leads from the connected lead source (Google Sheet / CRM / Database).',
+      trigger: 'Lead Retrieval Request',
+      explanation: isEmailDispatch
+        ? 'Lead Concierge fetches records directly from Google Sheet and Follow-up Agent sends the complete formatted leads report to your email.'
+        : isQualify
+          ? 'Lead Concierge fetches records and Lead Qualifier scores intent and budget fit.'
+          : 'Lead Concierge fetches records directly from the configured lead repository or Google Sheet.',
+      steps,
+      extractedTriggerData: {
+        ...defaultTriggerData,
+        recipientEmail: extractedEmail || defaultTriggerData.recipientEmail,
+        service: 'Lead Retrieval & Email Dispatch',
+        subject: defaultTriggerData.subject || 'Latest 10 Leads Report & Contact Ingestion',
+      },
+    };
+  }
+
+  // 17b. Inbound Lead Intake & Qualification (only attach booking if explicitly requested)
+  else if (text.includes('lead') || text.includes('qualif') || text.includes('intake') || text.includes('inquiry')) {
+    const wantsBooking = text.includes('book') || text.includes('schedul') || text.includes('appoint') || text.includes('calendar') || text.includes('slot');
+    idealWorkflow = {
+      name: wantsBooking ? 'Lead Intake, Qualification & Booking Pipeline' : 'Lead Intake & Qualification Pipeline',
+      description: wantsBooking
+        ? 'Captures incoming inquiries, qualifies budget and intent, and schedules consultations.'
+        : 'Captures incoming inquiries and qualifies budget fit, urgency, and treatment intent.',
       trigger: 'Inbound Lead Trigger',
-      explanation: 'Lead Concierge ingests inquiry, Lead Qualifier scores intent, and Booking Agent reserves calendar slots.',
-      steps: [
-        { order: 1, agentId: 'lead-concierge', agentName: 'Lead Concierge' },
-        { order: 2, agentId: 'lead-qualifier', agentName: 'Lead Qualifier' },
-        { order: 3, agentId: 'booking-agent', agentName: 'Booking Agent' },
-      ],
-      extractedTriggerData: { ...defaultTriggerData, service: 'Lead Qualification & Booking' },
+      explanation: wantsBooking
+        ? 'Lead Concierge ingests inquiry, Lead Qualifier scores intent, and Booking Agent reserves calendar slots.'
+        : 'Lead Concierge ingests inquiry and Lead Qualifier scores intent and readiness.',
+      steps: wantsBooking
+        ? [
+            { order: 1, agentId: 'lead-concierge', agentName: 'Lead Concierge' },
+            { order: 2, agentId: 'lead-qualifier', agentName: 'Lead Qualifier' },
+            { order: 3, agentId: 'booking-agent', agentName: 'Booking Agent' },
+          ]
+        : [
+            { order: 1, agentId: 'lead-concierge', agentName: 'Lead Concierge' },
+            { order: 2, agentId: 'lead-qualifier', agentName: 'Lead Qualifier' },
+          ],
+      extractedTriggerData: { ...defaultTriggerData, service: wantsBooking ? 'Lead Qualification & Booking' : 'Lead Qualification' },
     };
   }
 

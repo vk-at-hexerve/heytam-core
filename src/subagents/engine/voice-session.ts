@@ -90,6 +90,11 @@ export interface ElevenLabsAudioOptions {
 
 // In-memory cache for generated ElevenLabs audio buffers
 export const elevenLabsAudioCache = new Map<string, { buffer: Buffer; contentType: string; createdAt: number }>();
+let lastElevenLabsError: string | null = null;
+
+export function getElevenLabsLastError(): string | null {
+  return lastElevenLabsError;
+}
 
 export function getElevenLabsCacheKey(options: ElevenLabsAudioOptions): string {
   const hash = crypto.createHash('sha256');
@@ -114,7 +119,8 @@ export async function generateElevenLabsAudioBuffer(
 
   const apiKey = options.apiKey || process.env.ELEVENLABS_API_KEY;
   if (!apiKey) {
-    console.warn('[ElevenLabs] No API key provided for ElevenLabs audio generation.');
+    lastElevenLabsError = 'No API key provided for ElevenLabs audio generation.';
+    console.warn('[ElevenLabs]', lastElevenLabsError);
     return null;
   }
 
@@ -144,6 +150,16 @@ export async function generateElevenLabsAudioBuffer(
 
     if (!res.ok) {
       const errText = await res.text();
+      let errorDetail = `Status ${res.status}: ${errText}`;
+      try {
+        const parsed = JSON.parse(errText);
+        if (parsed?.detail?.message) {
+          errorDetail = parsed.detail.message;
+        } else if (parsed?.message) {
+          errorDetail = parsed.message;
+        }
+      } catch {}
+      lastElevenLabsError = errorDetail;
       console.error(`[ElevenLabs API Error] Status ${res.status}:`, errText);
       return null;
     }
@@ -163,8 +179,10 @@ export async function generateElevenLabsAudioBuffer(
       if (oldestKey) elevenLabsAudioCache.delete(oldestKey);
     }
 
+    lastElevenLabsError = null;
     return { buffer, cacheId };
   } catch (err) {
+    lastElevenLabsError = err instanceof Error ? err.message : 'Unknown generation exception';
     console.error('[ElevenLabs Generation Exception]:', err);
     return null;
   }
@@ -210,8 +228,48 @@ export function escapeXmlText(unsafe: string): string {
 }
 
 /**
+ * Real ElevenLabs Voice IDs mapped to high-fidelity Amazon Polly Neural Voices
+ */
+export const ELEVENLABS_TO_POLLY_MAP: Record<string, string> = {
+  '21m00Tcm4TlvDq8ikWAM': 'Polly.Joanna-Neural', // Rachel (Warm, Professional US Female)
+  'pNInz6obpgDQGcFmaJgB': 'Polly.Matthew-Neural', // Adam (Deep, Confident US Male)
+  'ErXwobaYiN019PkySvjV': 'Polly.Matthew-Neural', // Antoni (Natural, Conversational Male)
+  'EXAVITQu4vr4xnSDxMaL': 'Polly.Kendra-Neural',  // Bella (Vibrant, Expressive Female)
+  'TxGEqnHWrfWFTfGW9XjX': 'Polly.Joey-Neural',    // Josh (Relatable, Dynamic Male)
+  'piTKgcLEGmPE4e6mEKli': 'Polly.Kimberly-Neural',// Nicole (Soft, Empathetic Female)
+  'yoZ06aMxZJJ28mfd3POQ': 'Polly.Justin-Neural',  // Sam (Dynamic, Clear Male)
+  'AZnzlk1XvdvUeBnXmlld': 'Polly.Salli-Neural',   // Domi (Strong Narrative Female)
+};
+
+/**
+ * Resolves any voice identifier (ElevenLabs ID or persona name) to a valid Twilio Amazon Polly Neural voice.
+ * Prevents Twilio <Say> from choking on unhandled ElevenLabs voice IDs and falling back to 1990s robotic voices.
+ */
+export function resolveTwilioPollyVoice(voice?: string): string {
+  if (!voice) return 'Polly.Joanna-Neural';
+  const trimmed = voice.trim();
+  if (trimmed.startsWith('Polly.') || ['man', 'woman', 'alice'].includes(trimmed)) {
+    return trimmed;
+  }
+  if (ELEVENLABS_TO_POLLY_MAP[trimmed]) {
+    return ELEVENLABS_TO_POLLY_MAP[trimmed];
+  }
+  const lower = trimmed.toLowerCase();
+  if (lower.includes('adam') || lower.includes('antoni') || lower.includes('josh') || lower.includes('sam')) {
+    return 'Polly.Matthew-Neural';
+  }
+  if (lower.includes('bella') || lower.includes('kendra')) {
+    return 'Polly.Kendra-Neural';
+  }
+  if (lower.includes('nicole') || lower.includes('kimberly')) {
+    return 'Polly.Kimberly-Neural';
+  }
+  return 'Polly.Joanna-Neural';
+}
+
+/**
  * Generate interactive TwiML response with <Gather input="speech">
- * Twilio native Amazon Polly Neural voice layer (<Say voice="...">)
+ * Twilio native Amazon Polly Neural voice layer (<Say voice="...">) or ElevenLabs audio (<Play>)
  */
 export function generateGatherTwiML(options: {
   speech: string;
@@ -220,14 +278,19 @@ export function generateGatherTwiML(options: {
   isEnding?: boolean;
   audioUrl?: string | null;
 }): string {
-  const { speech, voice, turnUrl, isEnding } = options;
+  const { speech, voice, turnUrl, isEnding, audioUrl } = options;
   const escapedSpeech = escapeXmlText(speech);
-  const escapedVoice = escapeXml(voice || 'Polly.Joanna-Neural');
+  const pollyVoice = resolveTwilioPollyVoice(voice);
+  const escapedVoice = escapeXml(pollyVoice);
+
+  const speechElement = audioUrl
+    ? `<Play>${escapeXml(audioUrl)}</Play>`
+    : `<Say voice="${escapedVoice}">${escapedSpeech}</Say>`;
 
   if (isEnding) {
     return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="${escapedVoice}">${escapedSpeech}</Say>
+  ${speechElement}
   <Hangup/>
 </Response>`;
   }
@@ -235,7 +298,7 @@ export function generateGatherTwiML(options: {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather input="speech" speechTimeout="auto" speechModel="phone_call" timeout="10" action="${escapeXml(turnUrl)}" method="POST">
-    <Say voice="${escapedVoice}">${escapedSpeech}</Say>
+    ${speechElement}
   </Gather>
   <Gather input="speech" speechTimeout="auto" speechModel="phone_call" timeout="8" action="${escapeXml(turnUrl)}" method="POST">
     <Say voice="${escapedVoice}">I am still on the line. Could you let me know if those timings work for you, or if you have any questions?</Say>
@@ -253,12 +316,18 @@ export function generateClosingTwiML(options: {
   voice?: string;
   audioUrl?: string | null;
 }): string {
-  const escapedSpeech = escapeXmlText(options.speech);
-  const escapedVoice = escapeXml(options.voice || 'Polly.Joanna-Neural');
+  const { speech, voice, audioUrl } = options;
+  const escapedSpeech = escapeXmlText(speech);
+  const pollyVoice = resolveTwilioPollyVoice(voice);
+  const escapedVoice = escapeXml(pollyVoice);
+
+  const speechElement = audioUrl
+    ? `<Play>${escapeXml(audioUrl)}</Play>`
+    : `<Say voice="${escapedVoice}">${escapedSpeech}</Say>`;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="${escapedVoice}">${escapedSpeech}</Say>
+  ${speechElement}
   <Hangup/>
 </Response>`;
 }
