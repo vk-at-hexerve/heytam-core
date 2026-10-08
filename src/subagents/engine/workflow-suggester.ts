@@ -149,10 +149,9 @@ export function suggestWorkflow(prompt: string, options?: SuggestWorkflowOptions
   // ─── 2. Intent Taxonomy: Build Ideal Pipeline ─────────────────────────────────
   let idealWorkflow: SuggestedWorkflow;
 
-  // 0. Google Sheets Workflows
-  const isSheetIntent = text.includes('docs.google.com/spreadsheets') || text.includes('sheet') || text.includes('spreadsheet') || text.includes('csv');
+  const isSheetIntent = text.includes('docs.google.com/spreadsheets') || text.includes('sheet') || text.includes('spreadsheet') || text.includes('csv') || /\b(?:from|fetch|get|read|pull|ingest|details\s+of\s+customer\s+from)\s+(?:the\s+)?leads?\b/i.test(prompt) || /\b(?:all\s+(?:the\s+)?)?present\s+leads?\b/i.test(prompt);
   const isCalendarIntent = text.includes('calender') || text.includes('calendar') || text.includes('remainder') || text.includes('reminder') || text.includes('appoint') || text.includes('schedule') || text.includes('booking');
-  const isEmailSendIntent = (text.includes('send') || text.includes('dispatch') || text.includes('forward') || text.includes('deliver') || text.includes('email to') || text.includes('send to') || text.includes('send the data')) && (text.includes('email') || text.includes('mail') || text.includes('@')) && !text.includes('my email is');
+  const isEmailSendIntent = (text.includes('send') || text.includes('dispatch') || text.includes('forward') || text.includes('deliver') || text.includes('email to') || text.includes('send to') || text.includes('send the data') || text.includes('confirmation') || text.includes('email of confirmation')) && (text.includes('email') || text.includes('mail') || text.includes('@')) && !text.includes('my email is');
 
   const hasCallKeyword = text.includes('call') || text.includes('phone') || text.includes('dial') || text.includes('voice');
 
@@ -600,26 +599,40 @@ export function suggestWorkflow(prompt: string, options?: SuggestWorkflowOptions
 
   // 17b. Inbound Lead Intake & Qualification (only attach booking if explicitly requested)
   else if (text.includes('lead') || text.includes('qualif') || text.includes('intake') || text.includes('inquiry')) {
-    const wantsBooking = text.includes('book') || text.includes('schedul') || text.includes('appoint') || text.includes('calendar') || text.includes('slot');
+    const wantsBooking = text.includes('book') || text.includes('schedul') || text.includes('appoint') || text.includes('calendar') || text.includes('calender') || text.includes('slot') || text.includes('remainder') || text.includes('reminder');
+    const wantsEmail = (text.includes('send') || text.includes('dispatch') || text.includes('forward') || text.includes('confirmation')) && (text.includes('email') || text.includes('mail') || text.includes('@'));
+    const wantsQualify = text.includes('qualif') || text.includes('score') || text.includes('grade') || text.includes('rank');
+
+    const steps: { order: number; agentId: string; agentName: string }[] = [];
+    steps.push({ order: 1, agentId: 'lead-concierge', agentName: 'Lead Concierge & Sheet Ingestion' });
+    if (wantsQualify) {
+      steps.push({ order: steps.length + 1, agentId: 'lead-qualifier', agentName: 'Lead Qualifier' });
+    }
+    if (wantsBooking) {
+      steps.push({ order: steps.length + 1, agentId: 'booking-agent', agentName: 'Booking Agent (Calendar Appointments)' });
+    }
+    if (wantsEmail) {
+      steps.push({ order: steps.length + 1, agentId: 'follow-up-agent', agentName: 'Follow-up Agent (Confirmation Dispatch)' });
+    }
+
     idealWorkflow = {
-      name: wantsBooking ? 'Lead Intake, Qualification & Booking Pipeline' : 'Lead Intake & Qualification Pipeline',
-      description: wantsBooking
-        ? 'Captures incoming inquiries, qualifies budget and intent, and schedules consultations.'
-        : 'Captures incoming inquiries and qualifies budget fit, urgency, and treatment intent.',
+      name: wantsBooking && wantsEmail
+        ? 'Lead Ingestion, Calendar Sync & Confirmation Email Pipeline'
+        : wantsBooking
+          ? 'Lead Intake & Booking Pipeline'
+          : 'Lead Intake & Qualification Pipeline',
+      description: wantsBooking && wantsEmail
+        ? `Ingests leads, synchronizes appointments in Google Calendar, and delivers confirmation to ${extractedEmail || 'registered email'}.`
+        : wantsBooking
+          ? 'Captures incoming inquiries and schedules consultations in Google Calendar.'
+          : 'Captures incoming inquiries and qualifies budget fit, urgency, and treatment intent.',
       trigger: 'Inbound Lead Trigger',
-      explanation: wantsBooking
-        ? 'Lead Concierge ingests inquiry, Lead Qualifier scores intent, and Booking Agent reserves calendar slots.'
-        : 'Lead Concierge ingests inquiry and Lead Qualifier scores intent and readiness.',
-      steps: wantsBooking
-        ? [
-            { order: 1, agentId: 'lead-concierge', agentName: 'Lead Concierge' },
-            { order: 2, agentId: 'lead-qualifier', agentName: 'Lead Qualifier' },
-            { order: 3, agentId: 'booking-agent', agentName: 'Booking Agent' },
-          ]
-        : [
-            { order: 1, agentId: 'lead-concierge', agentName: 'Lead Concierge' },
-            { order: 2, agentId: 'lead-qualifier', agentName: 'Lead Qualifier' },
-          ],
+      explanation: wantsBooking && wantsEmail
+        ? 'Lead Concierge ingests lead records, Booking Agent creates calendar events with reminders, and Follow-up Agent sends confirmation emails.'
+        : wantsBooking
+          ? 'Lead Concierge ingests inquiry and Booking Agent reserves calendar slots.'
+          : 'Lead Concierge ingests inquiry and Lead Qualifier scores intent and readiness.',
+      steps,
       extractedTriggerData: { ...defaultTriggerData, service: wantsBooking ? 'Lead Qualification & Booking' : 'Lead Qualification' },
     };
   }

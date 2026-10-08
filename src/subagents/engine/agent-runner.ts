@@ -654,6 +654,7 @@ ${emailBody}
 
             const createdEvents: { name: string; time: string; link: string }[] = [];
             const targetCalendar = tenantKeys.googleCalendarId || 'primary';
+            let lastBatchError = '';
 
             for (let i = 1; i < csvLines.length; i++) {
               const vals = parseCsvLine(csvLines[i]);
@@ -723,7 +724,9 @@ ${emailBody}
                   link: ins.data.htmlLink || ins.data.id || '',
                 });
               } catch (insErr: any) {
-                console.error(`[Booking Agent] Error inserting appointment for ${clientName}:`, insErr.message);
+                const errMsg = insErr?.message || String(insErr);
+                lastBatchError = errMsg;
+                console.error(`[Booking Agent] Error inserting appointment for ${clientName}:`, errMsg);
               }
             }
 
@@ -732,6 +735,13 @@ ${emailBody}
                 `REAL: Successfully created ${createdEvents.length} Google Calendar appointments with reminders for all clients from Google Sheet: ` +
                 createdEvents.map(e => `${e.name} (${e.time})`).join(', ')
               );
+            } else {
+              const isInvalidGrant = lastBatchError.includes('invalid_grant') || lastBatchError.includes('Token has been expired or revoked');
+              const reason = isInvalidGrant
+                ? 'Google OAuth refresh token expired (Google automatically expires test tokens after 7 days). Please reconnect Google Calendar in Integrations & Credentials to get a fresh token.'
+                : (lastBatchError || 'Google Calendar API rejected appointment creation');
+              actionsExecuted.push(`ERROR: Google Calendar batch booking failed: ${reason}`);
+              object.messageToUser = `⚠️ Google Calendar error: Could not schedule appointments because ${reason}`;
             }
           }
         } else {
@@ -1016,12 +1026,15 @@ ${emailBody}
       actionsExecuted.push(`REAL: ${agentName} completed AI analysis and reasoning (no external API required).`);
     }
 
+    const hasErrorsOnly = actionsExecuted.length > 0 &&
+      actionsExecuted.every(a => a.startsWith('ERROR:'));
+
     return {
       agentName,
       agentRole: agentId,
       input,
       output: object,
-      status: 'success',
+      status: hasErrorsOnly ? 'error' : 'success',
       timestamp,
       tenantId,
       actionsExecuted,
