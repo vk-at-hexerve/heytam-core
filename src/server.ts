@@ -29,6 +29,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import dns from 'dns';
+try { dns.setServers(['8.8.8.8', '1.1.1.1']); } catch {}
+import { MongoClient } from 'mongodb';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -40,8 +43,27 @@ dotenv.config();
 import { dispatchWorkflow, dispatchSingleAgent, getAgentCatalog } from './subagents/engine/master-dispatcher.js';
 import { suggestWorkflow } from './subagents/engine/workflow-suggester.js';
 import { handleSupervisorPrompt } from './mastra/agents/heytam/index.js';
-import { TOOL_CATALOG, TOOL_BUNDLES, getToolById } from './subagents/catalog/toolCatalog.js';
+import { TOOL_CATALOG, TOOL_BUNDLES, getToolById, ELEVENLABS_VOICES } from './subagents/catalog/toolCatalog.js';
 import type { TenantKeys } from './subagents/schema.js';
+import {
+  callSessionsStore,
+  getCallSession,
+  upsertCallSession,
+  getCallSessionsForBusiness,
+  registerOrchestratorLogger,
+  logToOrchestrator,
+  getPublicBackendUrl,
+  generateGatherTwiML,
+  generateClosingTwiML,
+  generateAiVoiceReply,
+  generateElevenLabsAudioBuffer,
+  getElevenLabsLastError,
+  resolveTwilioPollyVoice,
+  elevenLabsAudioCache,
+  getElevenLabsCacheKey,
+  type CallSession,
+  type CallTurn,
+} from './subagents/engine/voice-session.js';
 
 // ─── Auth Types ────────────────────────────────────────────────────────────────
 interface AuthenticatedRequest extends Request {
@@ -96,6 +118,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id'],
 }));
 app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.use(morgan('combined'));
 
 // ─── Request ID middleware ─────────────────────────────────────────────────────
@@ -161,8 +184,8 @@ app.post('/api/dispatch', async (req: Request, res: Response) => {
   try {
     const effectiveTenant = tenantId || (Array.isArray(req.headers['x-tenant-id']) ? req.headers['x-tenant-id'][0] : req.headers['x-tenant-id']) || DEFAULT_BUSINESS.id;
     const bizTools = businessToolsStore.get(effectiveTenant) || [];
-    const biz = businessesStore.get(effectiveTenant) || DEFAULT_BUSINESS;
     const subscribedToolIds = bizTools.map((t: any) => t.toolId);
+    const biz = businessesStore.get(effectiveTenant) || DEFAULT_BUSINESS;
     const allAgentsSubscribed = Boolean(
       biz.plan?.name?.toLowerCase().includes('enterprise') ||
       biz.plan?.name?.toLowerCase().includes('all') ||
@@ -170,10 +193,17 @@ app.post('/api/dispatch', async (req: Request, res: Response) => {
       subscribedToolIds.includes('*')
     );
 
+    const resolvedContext = tenantContext || `Business: ${biz.name}
+Owner: ${biz.ownerName || 'Dr. ' + biz.name}
+Location: ${biz.location || 'New York'}
+Tone: ${biz.tone || 'Warm, professional, and helpful'}
+Available Services: ${(biz.services && biz.services.length > 0) ? biz.services.join(', ') : 'Consultations, Healthcare & Aesthetic Treatments'}
+Operating & Available Timings: ${biz.hours || 'Monday through Friday from 9:00 AM to 6:00 PM, Saturday from 10:00 AM to 4:00 PM'}`;
+
     const result = await dispatchWorkflow({
       prompt: String(prompt).trim(),
       tenantId: effectiveTenant,
-      tenantContext,
+      tenantContext: resolvedContext,
       tenantKeys: tenantKeys as any,
       subscribedToolIds,
       allAgentsSubscribed,
@@ -569,6 +599,73 @@ const oauthConnectionsStore = new Map<string, any>();
 const workflowRunsStore = new Map<string, any>();
 const customWorkflowsStore = new Map<string, any[]>();
 
+// ─── Real-time Voice Orchestrator Event Hook ──────────────────────────────────
+// Automatically streams every telephone turn (customer speech + AI reply) directly
+// into the HeyTam Orchestrator execution logs and step output of that call run.
+registerOrchestratorLogger((runId, logLine, meta) => {
+  const run = workflowRunsStore.get(runId);
+  if (run) {
+    if (!Array.isArray(run.orchestratorLog)) run.orchestratorLog = [];
+    run.orchestratorLog.push(logLine);
+
+    const callingAgents = ['voice-agent', 'outbound-calling-agent', 'receptionist-agent'];
+    const step = run.steps?.find((s: any) =>
+      (meta?.stepOrder && s.order === meta.stepOrder) || callingAgents.includes(s.agentId)
+    );
+    if (step) {
+      if (!Array.isArray(step.logs)) step.logs = [];
+      step.logs.push(logLine);
+      if (meta?.callSid) {
+        const session = callSessionsStore.get(meta.callSid);
+        if (session && session.turns && session.turns.length > 0) {
+          step.output = session.turns
+            .map(t => `${t.role === 'customer' ? '👤 Customer' : `🤖 AI (${t.voice || session.voice || 'Voice'})`}: "${t.text}"`)
+            .join('\n');
+        }
+      }
+    }
+  }
+});
+
+let mongoClient: MongoClient | null = null;
+let mongoDbInstance: any = null;
+
+async function getMongoDb() {
+  if (mongoDbInstance) return mongoDbInstance;
+  const uri = process.env.MONGODB_URI || process.env.DATABASE_URL;
+  if (!uri) return null;
+  try {
+    mongoClient = new MongoClient(uri);
+    await mongoClient.connect();
+    mongoDbInstance = mongoClient.db(process.env.MONGODB_DB || 'heytam-ai-agents');
+    console.log('✅ [MongoDB] Connected to MongoDB Atlas for multi-tenant credentials & workforce state.');
+    return mongoDbInstance;
+  } catch (err) {
+    console.warn('[MongoDB Warning] Could not connect to MongoDB Atlas, falling back to local file/memory store:', err);
+    return null;
+  }
+}
+
+function checkIsConfigured(cfg: any): boolean {
+  if (!cfg || typeof cfg !== 'object' || Object.keys(cfg).length === 0) return false;
+  return Boolean(
+    cfg.smtpHost ||
+    cfg.googleClientId ||
+    cfg.googleRefreshToken ||
+    cfg.accessToken ||
+    cfg.twilioAccountSid ||
+    cfg.twilioApiKeySid ||
+    cfg.twilioFromPhone ||
+    cfg.hubspotApiKey ||
+    cfg.ghlApiKey ||
+    cfg.plivoAuthId ||
+    cfg.calendlyApiKey ||
+    cfg.metaAccessToken ||
+    cfg.oauthConnected ||
+    cfg.verified
+  );
+}
+
 function savePersistentStores() {
   try {
     if (!fs.existsSync(DATA_DIR)) {
@@ -582,10 +679,108 @@ function savePersistentStores() {
       oauthConnectionsStore: Array.from(oauthConnectionsStore.entries()),
       workflowRunsStore: Array.from(workflowRunsStore.entries()),
       customWorkflowsStore: Array.from(customWorkflowsStore.entries()),
+      callSessionsStore: Array.from(callSessionsStore.entries()),
     };
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
   } catch (err) {
-    console.error('[Persistence Error] Failed to save store:', err);
+    console.error('[Persistence Error] Failed to save store to disk:', err);
+  }
+
+  // Non-blocking sync to MongoDB Atlas
+  getMongoDb().then(async (db) => {
+    if (!db) return;
+    try {
+      // Upsert OAuth connections
+      for (const [key, val] of oauthConnectionsStore.entries()) {
+        if (val && val.businessId && val.provider) {
+          await db.collection('oauth_connections').updateOne(
+            { businessId: val.businessId, provider: val.provider },
+            { $set: { ...val, updatedAt: new Date().toISOString() } },
+            { upsert: true }
+          );
+        }
+      }
+      // Upsert Tool Configs
+      for (const [key, val] of toolConfigStore.entries()) {
+        const parts = key.split('_');
+        if (parts.length >= 2) {
+          const bizId = parts.slice(0, 2).join('_');
+          const toolId = parts.slice(2).join('_');
+          await db.collection('tool_configurations').updateOne(
+            { businessId: bizId, toolId: toolId },
+            { $set: { businessId: bizId, toolId: toolId, config: val, isConfigured: checkIsConfigured(val), updatedAt: new Date().toISOString() } },
+            { upsert: true }
+          );
+        }
+      }
+      // Upsert Businesses
+      for (const [id, val] of businessesStore.entries()) {
+        await db.collection('businesses').updateOne(
+          { id },
+          { $set: { ...val, updatedAt: new Date().toISOString() } },
+          { upsert: true }
+        );
+      }
+    } catch (e) {
+      console.error('[MongoDB Error] Async save error:', e);
+    }
+  }).catch(() => {});
+}
+
+async function loadFromMongo() {
+  try {
+    const db = await getMongoDb();
+    if (!db) return;
+
+    // 1. Businesses
+    const businesses = await db.collection('businesses').find({}).toArray();
+    for (const b of businesses) {
+      if (b.id) businessesStore.set(b.id, b);
+    }
+
+    // 2. OAuth connections
+    const oauths = await db.collection('oauth_connections').find({}).toArray();
+    for (const o of oauths) {
+      if (o.businessId && o.provider) {
+        oauthConnectionsStore.set(`${o.businessId}_${o.provider}`, {
+          provider: o.provider,
+          businessId: o.businessId,
+          accountEmail: o.accountEmail,
+          connected: Boolean(o.connected),
+          verified: Boolean(o.verified ?? o.connected),
+          credentials: o.credentials || o.extraConfig || {},
+          extraConfig: o.extraConfig || o.credentials || {},
+          clientId: o.clientId || o.credentials?.clientId || o.extraConfig?.clientId || (o.provider.startsWith('google') ? process.env.GOOGLE_CLIENT_ID : undefined),
+          clientSecret: o.clientSecret || o.credentials?.clientSecret || o.extraConfig?.clientSecret || (o.provider.startsWith('google') ? process.env.GOOGLE_CLIENT_SECRET : undefined),
+          accessToken: o.accessToken || o.credentials?.accessToken || o.extraConfig?.accessToken,
+          refreshToken: o.refreshToken || o.credentials?.refreshToken || o.extraConfig?.refreshToken,
+          updatedAt: o.updatedAt,
+        });
+      }
+    }
+
+    // 3. Tool configurations
+    const toolConfigs = await db.collection('tool_configurations').find({}).toArray();
+    for (const tc of toolConfigs) {
+      if (tc.businessId && tc.toolId) {
+        toolConfigStore.set(`${tc.businessId}_${tc.toolId}`, tc.config || {});
+      }
+    }
+
+    // 4. Business tools
+    const bTools = await db.collection('business_tools').find({}).toArray();
+    const grouped = new Map<string, any[]>();
+    for (const bt of bTools) {
+      if (!grouped.has(bt.businessId)) grouped.set(bt.businessId, []);
+      grouped.get(bt.businessId)!.push(bt);
+    }
+    for (const [bizId, list] of grouped.entries()) {
+      businessToolsStore.set(bizId, list);
+    }
+
+    console.log(`💾 [Persistence] Synced with MongoDB Atlas: ${businesses.length} businesses, ${oauths.length} oauth conns, ${toolConfigs.length} tool configs, ${bTools.length} tools`);
+  } catch (err) {
+    console.error('[Persistence Error] Failed to load from MongoDB:', err);
   }
 }
 
@@ -615,6 +810,9 @@ function loadPersistentStores() {
       if (Array.isArray(data.customWorkflowsStore)) {
         for (const [k, v] of data.customWorkflowsStore) customWorkflowsStore.set(k, v);
       }
+      if (Array.isArray(data.callSessionsStore)) {
+        for (const [k, v] of data.callSessionsStore) callSessionsStore.set(k, v);
+      }
       console.log('💾 [Persistence] Successfully loaded stored credentials, tools, businesses, and workflows from disk!');
     }
   } catch (err) {
@@ -623,6 +821,7 @@ function loadPersistentStores() {
 }
 
 loadPersistentStores();
+loadFromMongo();
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:4000';
@@ -631,18 +830,18 @@ const GOOGLE_REDIRECT_URI = `${BACKEND_URL}/api/tools/oauth/google/callback`;
 function getTenantKeysForBusiness(businessId: string): TenantKeys {
   const keys: TenantKeys = {};
 
-  const googleConn = oauthConnectionsStore.get(`${businessId}_google`);
+  const googleConn = oauthConnectionsStore.get(`${businessId}_google`) || oauthConnectionsStore.get(`${businessId}_google_calendar`);
   if (googleConn) {
-    keys.googleClientId = googleConn.clientId || googleConn.extraConfig?.clientId;
-    keys.googleClientSecret = googleConn.clientSecret || googleConn.extraConfig?.clientSecret;
-    keys.googleAccessToken = googleConn.accessToken;
-    keys.googleRefreshToken = googleConn.refreshToken;
-    keys.googleCalendarId = googleConn.extraConfig?.googleCalendarId || googleConn.accountEmail || 'primary';
+    keys.googleClientId = googleConn.clientId || googleConn.credentials?.clientId || googleConn.credentials?.googleClientId || googleConn.extraConfig?.clientId || process.env.GOOGLE_CLIENT_ID;
+    keys.googleClientSecret = googleConn.clientSecret || googleConn.credentials?.clientSecret || googleConn.credentials?.googleClientSecret || googleConn.extraConfig?.clientSecret || process.env.GOOGLE_CLIENT_SECRET;
+    keys.googleAccessToken = googleConn.accessToken || googleConn.credentials?.accessToken || googleConn.credentials?.googleAccessToken || googleConn.extraConfig?.accessToken;
+    keys.googleRefreshToken = googleConn.refreshToken || googleConn.credentials?.refreshToken || googleConn.credentials?.googleRefreshToken || googleConn.extraConfig?.refreshToken;
+    keys.googleCalendarId = googleConn.extraConfig?.googleCalendarId || googleConn.credentials?.googleCalendarId || googleConn.accountEmail || 'primary';
   }
 
   const smtpConn = oauthConnectionsStore.get(`${businessId}_smtp`);
-  if (smtpConn && smtpConn.credentials) {
-    const sc = smtpConn.credentials;
+  if (smtpConn && (smtpConn.credentials || smtpConn.extraConfig)) {
+    const sc = smtpConn.credentials || smtpConn.extraConfig || {};
     if (sc.smtpHost) keys.smtpHost = sc.smtpHost;
     if (sc.smtpPort) keys.smtpPort = Number(sc.smtpPort);
     if (sc.smtpUser) keys.smtpUser = sc.smtpUser;
@@ -651,35 +850,117 @@ function getTenantKeysForBusiness(businessId: string): TenantKeys {
   }
 
   const twilioConn = oauthConnectionsStore.get(`${businessId}_twilio`);
-  if (twilioConn && twilioConn.credentials) {
-    const tc = twilioConn.credentials;
+  if (twilioConn && (twilioConn.credentials || twilioConn.extraConfig)) {
+    const tc = twilioConn.credentials || twilioConn.extraConfig || {};
     if (tc.twilioAccountSid) keys.twilioAccountSid = tc.twilioAccountSid;
     if (tc.twilioAuthToken) keys.twilioAuthToken = tc.twilioAuthToken;
     if (tc.twilioApiKeySid) keys.twilioApiKeySid = tc.twilioApiKeySid;
     if (tc.twilioApiKeySecret) keys.twilioApiKeySecret = tc.twilioApiKeySecret;
     if (tc.twilioFromPhone) keys.twilioFromPhone = tc.twilioFromPhone;
+    if (tc.twilioVoice) keys.twilioVoice = tc.twilioVoice;
+  }
+
+  // ElevenLabs dedicated connection
+  const elevenLabsConn = oauthConnectionsStore.get(`${businessId}_elevenlabs`);
+  if (elevenLabsConn && (elevenLabsConn.credentials || elevenLabsConn.extraConfig)) {
+    const el = elevenLabsConn.credentials || elevenLabsConn.extraConfig || {};
+    if (el.elevenLabsApiKey) keys.elevenLabsApiKey = el.elevenLabsApiKey;
+    if (el.elevenLabsVoiceId) keys.elevenLabsVoiceId = el.elevenLabsVoiceId;
+    if (el.elevenLabsModel) keys.elevenLabsModel = el.elevenLabsModel;
+    if (el.useElevenLabs !== undefined) {
+      keys.useElevenLabs = el.useElevenLabs === true || el.useElevenLabs === 'true';
+    } else if (el.elevenLabsApiKey) {
+      keys.useElevenLabs = true;
+    }
+    if (el.elevenLabsStability) keys.elevenLabsStability = Number(el.elevenLabsStability);
+    if (el.elevenLabsSimilarity) keys.elevenLabsSimilarity = Number(el.elevenLabsSimilarity);
+  }
+
+  // Google Sheets / Lead Source dedicated connection
+  const googleSheetsConn = oauthConnectionsStore.get(`${businessId}_google_sheets`);
+  if (googleSheetsConn && (googleSheetsConn.credentials || googleSheetsConn.extraConfig)) {
+    const gsc = googleSheetsConn.credentials || googleSheetsConn.extraConfig || {};
+    if (gsc.googleSheetId) keys.googleSheetId = gsc.googleSheetId;
+    if (gsc.googleSheetRange) keys.googleSheetRange = gsc.googleSheetRange;
+    if (gsc.leadSourceType) keys.leadSourceType = gsc.leadSourceType;
   }
 
   const checkAgents = [
-    'follow-up-agent', 'booking-agent', 'lead-concierge', 'smtp', 'google',
-    'twilio', 'voice-agent', 'outbound-calling-agent', 'sms-concierge', 'whatsapp-concierge'
+    'follow-up-agent', 'booking-agent', 'lead-concierge', 'lead-qualifier', 'smtp', 'google', 'google_sheets',
+    'twilio', 'voice-agent', 'outbound-calling-agent', 'sms-concierge', 'whatsapp-concierge',
+    'campaign-agent', 'crm-agent', 'inbox-tool', 'reactivation-agent', 'review-agent', 'waitlist-agent', 'rebooking-agent', 'upsell-agent', 'lead-recovery-agent', 'elevenlabs'
   ];
   for (const tid of checkAgents) {
     const cfg = toolConfigStore.get(`${businessId}_${tid}`) || {};
-    if (cfg.smtpHost) keys.smtpHost = cfg.smtpHost;
-    if (cfg.smtpPort) keys.smtpPort = Number(cfg.smtpPort);
-    if (cfg.smtpUser) keys.smtpUser = cfg.smtpUser;
-    if (cfg.smtpPass) keys.smtpPass = cfg.smtpPass;
-    if (cfg.smtpFrom) keys.smtpFrom = cfg.smtpFrom;
-    if (cfg.googleClientId) keys.googleClientId = cfg.googleClientId;
-    if (cfg.googleClientSecret) keys.googleClientSecret = cfg.googleClientSecret;
-    if (cfg.googleRefreshToken) keys.googleRefreshToken = cfg.googleRefreshToken;
-    if (cfg.googleAccessToken) keys.googleAccessToken = cfg.googleAccessToken;
-    if (cfg.twilioAccountSid) keys.twilioAccountSid = cfg.twilioAccountSid;
-    if (cfg.twilioAuthToken) keys.twilioAuthToken = cfg.twilioAuthToken;
-    if (cfg.twilioApiKeySid) keys.twilioApiKeySid = cfg.twilioApiKeySid;
-    if (cfg.twilioApiKeySecret) keys.twilioApiKeySecret = cfg.twilioApiKeySecret;
-    if (cfg.twilioFromPhone) keys.twilioFromPhone = cfg.twilioFromPhone;
+    if (cfg.smtpHost && !keys.smtpHost) keys.smtpHost = cfg.smtpHost;
+    if (cfg.smtpPort && !keys.smtpPort) keys.smtpPort = Number(cfg.smtpPort);
+    if (cfg.smtpUser && !keys.smtpUser) keys.smtpUser = cfg.smtpUser;
+    if (cfg.smtpPass && !keys.smtpPass) keys.smtpPass = cfg.smtpPass;
+    if (cfg.smtpFrom && !keys.smtpFrom) keys.smtpFrom = cfg.smtpFrom;
+    if (cfg.googleClientId && !keys.googleClientId) keys.googleClientId = cfg.googleClientId;
+    if (cfg.googleClientSecret && !keys.googleClientSecret) keys.googleClientSecret = cfg.googleClientSecret;
+    if (cfg.googleRefreshToken && !keys.googleRefreshToken) keys.googleRefreshToken = cfg.googleRefreshToken;
+    if (cfg.googleAccessToken && !keys.googleAccessToken) keys.googleAccessToken = cfg.googleAccessToken;
+    if (cfg.googleServiceAccountJson && !keys.googleServiceAccountJson) keys.googleServiceAccountJson = cfg.googleServiceAccountJson;
+    if (cfg.googleServiceAccountEmail && !keys.googleServiceAccountEmail) keys.googleServiceAccountEmail = cfg.googleServiceAccountEmail;
+    if (cfg.googleServiceAccountPrivateKey && !keys.googleServiceAccountPrivateKey) keys.googleServiceAccountPrivateKey = cfg.googleServiceAccountPrivateKey;
+    if (cfg.twilioAccountSid && !keys.twilioAccountSid) keys.twilioAccountSid = cfg.twilioAccountSid;
+    if (cfg.twilioAuthToken && !keys.twilioAuthToken) keys.twilioAuthToken = cfg.twilioAuthToken;
+    if (cfg.twilioApiKeySid && !keys.twilioApiKeySid) keys.twilioApiKeySid = cfg.twilioApiKeySid;
+    if (cfg.twilioApiKeySecret && !keys.twilioApiKeySecret) keys.twilioApiKeySecret = cfg.twilioApiKeySecret;
+    if (cfg.twilioFromPhone && !keys.twilioFromPhone) keys.twilioFromPhone = cfg.twilioFromPhone;
+    if (cfg.twilioVoice && !keys.twilioVoice) keys.twilioVoice = cfg.twilioVoice;
+    // Lead Source & CRM configs
+    if (cfg.googleSheetId && !keys.googleSheetId) keys.googleSheetId = cfg.googleSheetId;
+    if (cfg.googleSheetRange && !keys.googleSheetRange) keys.googleSheetRange = cfg.googleSheetRange;
+    if (cfg.leadSourceType && !keys.leadSourceType) keys.leadSourceType = cfg.leadSourceType;
+    if (cfg.ghlApiKey && !keys.ghlApiKey) keys.ghlApiKey = cfg.ghlApiKey;
+    if (cfg.ghlLocationId && !keys.ghlLocationId) keys.ghlLocationId = cfg.ghlLocationId;
+    if (cfg.hubspotApiKey && !keys.hubspotApiKey) keys.hubspotApiKey = cfg.hubspotApiKey;
+    if (cfg.leadFilterStatus && !keys.leadFilterStatus) keys.leadFilterStatus = cfg.leadFilterStatus;
+    if (cfg.maxLeadsPerRun && !keys.maxLeadsPerRun) keys.maxLeadsPerRun = Number(cfg.maxLeadsPerRun);
+    // ElevenLabs Agent-level configs
+    if (cfg.elevenLabsApiKey && !keys.elevenLabsApiKey) keys.elevenLabsApiKey = cfg.elevenLabsApiKey;
+    if (cfg.elevenLabsVoiceId && !keys.elevenLabsVoiceId) {
+      keys.elevenLabsVoiceId = cfg.elevenLabsVoiceId === 'custom' ? cfg.elevenLabsCustomVoiceId : cfg.elevenLabsVoiceId;
+    }
+    if (cfg.elevenLabsModel && !keys.elevenLabsModel) keys.elevenLabsModel = cfg.elevenLabsModel;
+    if (cfg.useElevenLabs !== undefined && keys.useElevenLabs === undefined) {
+      keys.useElevenLabs = cfg.useElevenLabs === true || cfg.useElevenLabs === 'true';
+    }
+    if (cfg.elevenLabsStability && !keys.elevenLabsStability) keys.elevenLabsStability = Number(cfg.elevenLabsStability);
+    if (cfg.elevenLabsSimilarity && !keys.elevenLabsSimilarity) keys.elevenLabsSimilarity = Number(cfg.elevenLabsSimilarity);
+  }
+
+  // System environment variable fallbacks
+  if (!keys.googleClientId && process.env.GOOGLE_CLIENT_ID) keys.googleClientId = process.env.GOOGLE_CLIENT_ID;
+  if (!keys.googleClientSecret && process.env.GOOGLE_CLIENT_SECRET) keys.googleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  if (!keys.smtpHost && process.env.DEFAULT_SMTP_HOST) keys.smtpHost = process.env.DEFAULT_SMTP_HOST;
+  if (!keys.smtpPort && process.env.DEFAULT_SMTP_PORT) keys.smtpPort = Number(process.env.DEFAULT_SMTP_PORT);
+  if (!keys.smtpUser && process.env.DEFAULT_SMTP_USER) keys.smtpUser = process.env.DEFAULT_SMTP_USER;
+  if (!keys.smtpPass && process.env.DEFAULT_SMTP_PASS) keys.smtpPass = process.env.DEFAULT_SMTP_PASS;
+  if (!keys.smtpFrom && process.env.DEFAULT_SMTP_FROM) keys.smtpFrom = process.env.DEFAULT_SMTP_FROM;
+  if (!keys.twilioAccountSid && (process.env.DEFAULT_TWILIO_ACCOUNT_SID || process.env.TWILIO_ACCOUNT_SID)) {
+    keys.twilioAccountSid = process.env.DEFAULT_TWILIO_ACCOUNT_SID || process.env.TWILIO_ACCOUNT_SID;
+  }
+  if (!keys.twilioAuthToken && (process.env.DEFAULT_TWILIO_AUTH_TOKEN || process.env.TWILIO_AUTH_TOKEN)) {
+    keys.twilioAuthToken = process.env.DEFAULT_TWILIO_AUTH_TOKEN || process.env.TWILIO_AUTH_TOKEN;
+  }
+  if (!keys.twilioFromPhone && (process.env.DEFAULT_TWILIO_FROM_PHONE || process.env.TWILIO_FROM_PHONE)) {
+    keys.twilioFromPhone = process.env.DEFAULT_TWILIO_FROM_PHONE || process.env.TWILIO_FROM_PHONE;
+  }
+
+  // ElevenLabs environment fallback & defaults
+  if (!keys.elevenLabsApiKey && process.env.ELEVENLABS_API_KEY) keys.elevenLabsApiKey = process.env.ELEVENLABS_API_KEY;
+  if (!keys.elevenLabsVoiceId) keys.elevenLabsVoiceId = '21m00Tcm4TlvDq8ikWAM'; // Rachel (Female US)
+  if (!keys.elevenLabsModel) keys.elevenLabsModel = 'eleven_turbo_v2_5';
+  if (keys.elevenLabsApiKey && keys.useElevenLabs !== false) {
+    keys.useElevenLabs = true;
+  }
+
+  const biz = businessesStore.get(businessId) || DEFAULT_BUSINESS;
+  if (!keys.businessEmail) {
+    keys.businessEmail = biz.email || biz.ownerEmail || 'shivamawasthi1129@gmail.com';
   }
 
   return keys;
@@ -697,7 +978,7 @@ function getInitialBusinessTools(businessId: string) {
   return starterIds.map(id => {
     const meta = getToolById(id);
     const cfg = toolConfigStore.get(`${businessId}_${id}`);
-    const isConfigured = Boolean(cfg && Object.keys(cfg).length > 0 && (cfg.smtpHost || cfg.googleClientId || cfg.googleRefreshToken || cfg.accessToken));
+    const isConfigured = checkIsConfigured(cfg);
     return {
       id: `bt_${businessId}_${id}`,
       businessId,
@@ -724,15 +1005,33 @@ app.get('/api/tools/catalog', (_req: Request, res: Response) => {
 });
 
 // GET /api/tools/:businessId — active tools for a business
-app.get('/api/tools/:businessId', requireAuth, (req: Request, res: Response) => {
+app.get('/api/tools/:businessId', requireAuth, async (req: Request, res: Response) => {
   const businessId = (req as AuthenticatedRequest).businessId;
+  if (!businessToolsStore.has(businessId)) {
+    try {
+      const db = await getMongoDb();
+      if (db) {
+        const docs = await db.collection('business_tools').find({ businessId }).toArray();
+        if (docs.length > 0) {
+          businessToolsStore.set(businessId, docs);
+        }
+      }
+    } catch {}
+  }
   if (!businessToolsStore.has(businessId)) {
     businessToolsStore.set(businessId, getInitialBusinessTools(businessId));
   }
   const tools = businessToolsStore.get(businessId) || [];
   const enriched = tools.map(t => {
     const meta = getToolById(t.toolId);
-    return { ...t, meta: meta || t.meta || null };
+    const cfg = toolConfigStore.get(`${businessId}_${t.toolId}`) || {};
+    const isConfig = checkIsConfigured(cfg) || Boolean(t.isConfigured);
+    return {
+      ...t,
+      status: isConfig ? 'active' : (t.status || 'needs_setup'),
+      isConfigured: isConfig,
+      meta: meta || t.meta || null,
+    };
   });
   res.json({ success: true, tools: enriched });
 });
@@ -851,12 +1150,26 @@ app.delete('/api/tools/:businessId/:toolId', requireAuth, (req: Request, res: Re
 });
 
 // GET /api/tools/:businessId/:toolId/config — get tool config
-app.get('/api/tools/:businessId/:toolId/config', requireAuth, (req: Request, res: Response) => {
+app.get('/api/tools/:businessId/:toolId/config', requireAuth, async (req: Request, res: Response) => {
   const businessId = (req as AuthenticatedRequest).businessId;
   const { toolId } = req.params;
   const key = `${businessId}_${toolId}`;
-  const config = toolConfigStore.get(key) || {};
-  const isConfigured = Boolean(config && Object.keys(config).length > 0 && (config.smtpHost || config.googleClientId || config.googleRefreshToken || config.accessToken));
+  let config = toolConfigStore.get(key) || {};
+
+  if (!config || Object.keys(config).length === 0) {
+    try {
+      const db = await getMongoDb();
+      if (db) {
+        const doc = await db.collection('tool_configurations').findOne({ businessId, toolId });
+        if (doc && doc.config) {
+          config = doc.config;
+          toolConfigStore.set(key, config);
+        }
+      }
+    } catch {}
+  }
+
+  const isConfigured = checkIsConfigured(config);
   res.json({ success: true, isConfigured, config });
 });
 
@@ -893,11 +1206,14 @@ app.put('/api/tools/:businessId/:toolId/config', requireAuth, (req: Request, res
 
 // POST /api/tools/:businessId/:toolId/test — test tool connection
 app.post('/api/tools/:businessId/:toolId/test', requireAuth, async (req: Request, res: Response) => {
-  const businessId = (req as AuthenticatedRequest).businessId;
-  const { toolId } = req.params;
+  const businessId = String((req as AuthenticatedRequest).businessId);
+  const rawToolId = req.params.toolId;
+  const toolId = String(Array.isArray(rawToolId) ? rawToolId[0] : rawToolId || '');
   const key = `${businessId}_${toolId}`;
   const config = toolConfigStore.get(key) || {};
+  const tenantKeys = getTenantKeysForBusiness(businessId);
 
+  // 1. SMTP Email Test
   if (config.smtpHost && config.smtpUser && config.smtpPass) {
     try {
       const cleanPass = String(config.smtpPass).trim().replace(/\s+/g, '');
@@ -916,11 +1232,176 @@ app.post('/api/tools/:businessId/:toolId/test', requireAuth, async (req: Request
     }
   }
 
+  // 2. Google Calendar / Google OAuth Test
+  const isGoogleTool = ['booking-agent', 'calendar-tool', 'google', 'google_calendar', 'rebooking-agent', 'waitlist-agent'].includes(toolId) ||
+                       Boolean(config.googleRefreshToken || config.googleAccessToken || config.googleClientId || config.googleServiceAccountJson);
+  if (isGoogleTool) {
+    const clientId = config.googleClientId || tenantKeys.googleClientId || process.env.GOOGLE_CLIENT_ID;
+    const clientSecret = config.googleClientSecret || tenantKeys.googleClientSecret || process.env.GOOGLE_CLIENT_SECRET;
+    const refreshToken = config.googleRefreshToken || tenantKeys.googleRefreshToken;
+    const accessToken = config.googleAccessToken || tenantKeys.googleAccessToken;
+    const saJson = config.googleServiceAccountJson || tenantKeys.googleServiceAccountJson;
+    const saEmail = config.googleServiceAccountEmail || tenantKeys.googleServiceAccountEmail;
+    const saKey = config.googleServiceAccountPrivateKey || tenantKeys.googleServiceAccountPrivateKey;
+
+    if (saJson || (saEmail && saKey)) {
+      try {
+        let auth;
+        if (saJson) {
+          const creds = typeof saJson === 'string' ? JSON.parse(saJson) : saJson;
+          auth = new google.auth.JWT({
+            email: creds.client_email,
+            key: creds.private_key,
+            scopes: ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/calendar.events'],
+          });
+        } else {
+          auth = new google.auth.JWT({
+            email: saEmail,
+            key: saKey!.replace(/\\n/g, '\n'),
+            scopes: ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/calendar.events'],
+          });
+        }
+        const cal = google.calendar({ version: 'v3', auth });
+        await cal.calendarList.list({ maxResults: 1 });
+        return res.json({ testResult: { success: true, message: `Google Service Account authenticated and verified successfully.` } });
+      } catch (gErr: any) {
+        return res.json({ testResult: { success: false, message: `Google Service Account error: ${gErr.message}` } });
+      }
+    }
+
+    if (!refreshToken && !accessToken) {
+      return res.json({
+        testResult: {
+          success: false,
+          message: 'Google Calendar credentials not configured. Please click "1-Click Fast Connect" or enter your credentials in the panel.',
+        },
+      });
+    }
+
+    try {
+      const oauth2Client = new google.auth.OAuth2(clientId, clientSecret);
+      oauth2Client.setCredentials({ refresh_token: refreshToken, access_token: accessToken });
+      const cal = google.calendar({ version: 'v3', auth: oauth2Client });
+      await cal.calendarList.list({ maxResults: 1 });
+      const accountEmail = oauthConnectionsStore.get(`${businessId}_google`)?.accountEmail ||
+                           oauthConnectionsStore.get(`${businessId}_google_calendar`)?.accountEmail ||
+                           config.googleEmail ||
+                           config.oauthEmail ||
+                           'connected calendar';
+      return res.json({
+        testResult: {
+          success: true,
+          message: `Google Calendar authenticated successfully for ${accountEmail}. Ready for automated scheduling.`,
+        },
+      });
+    } catch (gErr: any) {
+      const msg = gErr?.message || String(gErr);
+      if (msg.includes('invalid_grant') || msg.includes('Token has been expired or revoked')) {
+        return res.json({
+          testResult: {
+            success: false,
+            message: 'Google OAuth token expired or revoked (Google limits tokens in "Testing" mode to 7 days). Please click "1-Click Fast Connect" in the dashboard to refresh your connection.',
+          },
+        });
+      }
+      return res.json({ testResult: { success: false, message: `Google Calendar test failed: ${msg}` } });
+    }
+  }
+
+  // 3. ElevenLabs Voice Layer Test
+  const isElevenLabsTool = ['elevenlabs', 'voice-agent', 'outbound-calling-agent'].includes(toolId) ||
+                           Boolean(config.elevenLabsApiKey || tenantKeys.elevenLabsApiKey);
+  if (isElevenLabsTool && (config.elevenLabsApiKey || tenantKeys.elevenLabsApiKey)) {
+    const apiKey = String(config.elevenLabsApiKey || tenantKeys.elevenLabsApiKey || '').trim();
+    const voiceId = String(config.elevenLabsVoiceId || tenantKeys.elevenLabsVoiceId || 'TxGEqnHWrfWFTfGW9XjX').trim();
+    try {
+      // 1. Check API Key validity against voices endpoint
+      const voicesRes = await fetch('https://api.elevenlabs.io/v1/voices', {
+        headers: { 'xi-api-key': apiKey },
+      });
+      if (voicesRes.status === 401) {
+        return res.json({
+          testResult: {
+            success: false,
+            message: 'ElevenLabs Authentication Error: Invalid API key. Please check your ElevenLabs API key.',
+          },
+        });
+      }
+
+      // 2. Perform micro-TTS probe to verify billing and synthesis entitlement
+      const ttsProbe = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`, {
+        method: 'POST',
+        headers: {
+          'xi-api-key': apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: 'Hello',
+          model_id: 'eleven_turbo_v2_5',
+        }),
+      });
+
+      if (!ttsProbe.ok) {
+        const errText = await ttsProbe.text();
+        let detail = `HTTP ${ttsProbe.status}: ${errText}`;
+        try {
+          const parsed = JSON.parse(errText);
+          detail = parsed.detail?.message || parsed.message || detail;
+        } catch {}
+        if (detail.includes('payment') || detail.includes('invoice') || ttsProbe.status === 402) {
+          return res.json({
+            testResult: {
+              success: false,
+              message: `ElevenLabs Billing Issue: ${detail} Please complete your outstanding invoice at elevenlabs.io to enable speech generation.`,
+            },
+          });
+        }
+        return res.json({
+          testResult: {
+            success: false,
+            message: `ElevenLabs TTS Error (${ttsProbe.status}): ${detail}`,
+          },
+        });
+      }
+
+      return res.json({
+        testResult: {
+          success: true,
+          message: 'ElevenLabs voice layer authenticated and verified successfully! Real-time voice generation is active.',
+        },
+      });
+    } catch (elErr: any) {
+      return res.json({ testResult: { success: false, message: `ElevenLabs connection error: ${elErr.message}` } });
+    }
+  }
+
+  // 4. Twilio Telephony Test
+  const isTwilioTool = ['twilio', 'voice-agent', 'outbound-calling-agent', 'sms-concierge', 'whatsapp-concierge'].includes(toolId) ||
+                       Boolean(config.twilioAccountSid || tenantKeys.twilioAccountSid);
+  if (isTwilioTool && (config.twilioAccountSid || tenantKeys.twilioAccountSid)) {
+    const sid = config.twilioAccountSid || tenantKeys.twilioAccountSid;
+    const token = config.twilioAuthToken || tenantKeys.twilioAuthToken;
+    if (sid && token) {
+      try {
+        const twClient = twilio(sid, token);
+        const account = await twClient.api.v2010.accounts(sid).fetch();
+        return res.json({
+          testResult: {
+            success: true,
+            message: `Twilio connection verified for account "${account.friendlyName}" (${account.status}).`,
+          },
+        });
+      } catch (twErr: any) {
+        return res.json({ testResult: { success: false, message: `Twilio verification error: ${twErr.message}` } });
+      }
+    }
+  }
+
   res.json({ testResult: { success: true, message: 'Tool parameters verified. Ready for execution.' } });
 });
 
 // GET /api/tools/:businessId/oauth/status
-app.get('/api/tools/:businessId/oauth/status', requireAuth, (req: Request, res: Response) => {
+app.get('/api/tools/:businessId/oauth/status', requireAuth, async (req: Request, res: Response) => {
   const businessId = (req as AuthenticatedRequest).businessId;
   const connections: Record<string, any> = {};
   for (const [key, value] of oauthConnectionsStore.entries()) {
@@ -929,6 +1410,35 @@ app.get('/api/tools/:businessId/oauth/status', requireAuth, (req: Request, res: 
       connections[provider] = value;
     }
   }
+
+  // Ensure consistency across multiple pods via MongoDB Atlas
+  try {
+    const db = await getMongoDb();
+    if (db) {
+      const docs = await db.collection('oauth_connections').find({ businessId }).toArray();
+      for (const d of docs) {
+        if (d.provider) {
+          const existing = oauthConnectionsStore.get(`${businessId}_${d.provider}`) || {};
+          const item = {
+            provider: d.provider,
+            businessId: d.businessId,
+            accountEmail: d.accountEmail,
+            connected: Boolean(d.connected),
+            verified: Boolean(d.verified ?? d.connected),
+            credentials: d.credentials || d.extraConfig || {},
+            extraConfig: d.extraConfig || d.credentials || {},
+            clientId: d.clientId || d.credentials?.clientId || d.extraConfig?.clientId || existing.clientId || (d.provider.startsWith('google') ? process.env.GOOGLE_CLIENT_ID : undefined),
+            clientSecret: d.clientSecret || d.credentials?.clientSecret || d.extraConfig?.clientSecret || existing.clientSecret || (d.provider.startsWith('google') ? process.env.GOOGLE_CLIENT_SECRET : undefined),
+            accessToken: d.accessToken || d.credentials?.accessToken || d.extraConfig?.accessToken || existing.accessToken,
+            refreshToken: d.refreshToken || d.credentials?.refreshToken || d.extraConfig?.refreshToken || existing.refreshToken,
+          };
+          connections[d.provider] = item;
+          oauthConnectionsStore.set(`${businessId}_${d.provider}`, item);
+        }
+      }
+    }
+  } catch {}
+
   res.json({ success: true, connections });
 });
 
@@ -946,6 +1456,8 @@ app.get('/api/tools/:businessId/oauth/google/url', requireAuth, async (req: Requ
       'https://www.googleapis.com/auth/calendar.events',
       'https://www.googleapis.com/auth/gmail.send',
       'https://www.googleapis.com/auth/gmail.readonly',
+      'https://www.googleapis.com/auth/spreadsheets',
+      'https://www.googleapis.com/auth/spreadsheets.readonly',
       'https://www.googleapis.com/auth/userinfo.email',
       'https://www.googleapis.com/auth/userinfo.profile',
     ];
@@ -1152,19 +1664,71 @@ app.post('/api/tools/:businessId/oauth/connect-credentials', requireAuth, async 
       } catch (e: any) {
         return res.status(400).json({ error: `Twilio verification failed: ${e.message}` });
       }
+    } else if (provider === 'elevenlabs') {
+      const elKey = String(credentials.elevenLabsApiKey || credentials.apiKey || '').trim();
+      if (!elKey) {
+        return res.status(400).json({ error: 'ElevenLabs API Key is required.' });
+      }
+      const testVoice = String(credentials.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM').trim();
+      try {
+        const testRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(testVoice)}?output_format=mp3_44100_128`, {
+          method: 'POST',
+          headers: {
+            'xi-api-key': elKey,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            text: 'Testing ElevenLabs voice persona connection.',
+            model_id: 'eleven_turbo_v2_5',
+          }),
+        });
+        if (!testRes.ok) {
+          const errText = await testRes.text();
+          let detail = `HTTP ${testRes.status}`;
+          try {
+            const parsed = JSON.parse(errText);
+            if (parsed?.detail?.message) detail = parsed.detail.message;
+            else if (parsed?.message) detail = parsed.message;
+          } catch {}
+          return res.status(400).json({
+            error: `ElevenLabs verification failed (${detail}). Please verify your account and subscription billing at elevenlabs.io.`,
+          });
+        }
+        verified = true;
+        verifyMessage = `ElevenLabs AI Voice verified and connected successfully!`;
+      } catch (elErr: any) {
+        return res.status(400).json({
+          error: `ElevenLabs connection check failed: ${elErr.message}`,
+        });
+      }
     } else {
       verified = true;
       verifyMessage = `${provider} credentials saved`;
     }
 
     const key = `${businessId}_${provider}`;
-    oauthConnectionsStore.set(key, {
+    const existingConn = oauthConnectionsStore.get(key) || {};
+    const accountEmail = credentials.accountEmail || credentials.smtpUser || (credentials.twilioAccountSid ? `${credentials.twilioAccountSid}` : undefined) || existingConn.accountEmail || 'connected';
+    const connObj = {
       provider,
       businessId,
       credentials,
+      extraConfig: credentials,
+      connected: true,
       verified,
+      accountEmail,
+      clientId: credentials.clientId || credentials.googleClientId || existingConn.clientId || (provider.startsWith('google') ? process.env.GOOGLE_CLIENT_ID : undefined),
+      clientSecret: credentials.clientSecret || credentials.googleClientSecret || existingConn.clientSecret || (provider.startsWith('google') ? process.env.GOOGLE_CLIENT_SECRET : undefined),
+      refreshToken: credentials.refreshToken || credentials.googleRefreshToken || existingConn.refreshToken,
+      accessToken: credentials.accessToken || credentials.googleAccessToken || existingConn.accessToken,
       updatedAt: new Date().toISOString(),
-    });
+    };
+    oauthConnectionsStore.set(key, connObj);
+    if (provider === 'google') {
+      oauthConnectionsStore.set(`${businessId}_google_calendar`, { ...connObj, provider: 'google_calendar' });
+    } else if (provider === 'google_calendar') {
+      oauthConnectionsStore.set(`${businessId}_google`, { ...connObj, provider: 'google' });
+    }
 
     if (provider === 'twilio') {
       const twilioAgents = ['voice-agent', 'outbound-calling-agent', 'sms-concierge', 'whatsapp-concierge', 'twilio'];
@@ -1174,6 +1738,45 @@ app.post('/api/tools/:businessId/oauth/connect-credentials', requireAuth, async 
       const tools = businessToolsStore.get(businessId) || [];
       for (const t of tools) {
         if (twilioAgents.includes(t.toolId)) {
+          t.status = 'active';
+          t.isConfigured = true;
+        }
+      }
+    } else if (provider === 'google' || provider === 'google_calendar') {
+      const googleAgents = ['booking-agent', 'calendar-tool', 'crm-agent', 'rebooking-agent', 'waitlist-agent', 'campaign-agent', 'review-agent', 'reactivation-agent'];
+      for (const tid of googleAgents) {
+        const existing = toolConfigStore.get(`${businessId}_${tid}`) || {};
+        toolConfigStore.set(`${businessId}_${tid}`, { ...existing, ...credentials, oauthConnected: true, oauthProvider: 'google' });
+      }
+      const tools = businessToolsStore.get(businessId) || [];
+      for (const t of tools) {
+        if (googleAgents.includes(t.toolId)) {
+          t.status = 'active';
+          t.isConfigured = true;
+        }
+      }
+    } else if (provider === 'elevenlabs') {
+      const voiceAgents = ['voice-agent', 'outbound-calling-agent', 'elevenlabs'];
+      for (const tid of voiceAgents) {
+        const existing = toolConfigStore.get(`${businessId}_${tid}`) || {};
+        toolConfigStore.set(`${businessId}_${tid}`, { ...existing, ...credentials, useElevenLabs: true });
+      }
+      const tools = businessToolsStore.get(businessId) || [];
+      for (const t of tools) {
+        if (voiceAgents.includes(t.toolId)) {
+          t.status = 'active';
+          t.isConfigured = true;
+        }
+      }
+    } else if (provider === 'google_sheets') {
+      const sheetAgents = ['lead-concierge', 'lead-qualifier', 'follow-up-agent', 'crm-agent', 'google_sheets'];
+      for (const tid of sheetAgents) {
+        const existing = toolConfigStore.get(`${businessId}_${tid}`) || {};
+        toolConfigStore.set(`${businessId}_${tid}`, { ...existing, ...credentials, leadSourceType: credentials.leadSourceType || 'google_sheet' });
+      }
+      const tools = businessToolsStore.get(businessId) || [];
+      for (const t of tools) {
+        if (sheetAgents.includes(t.toolId)) {
           t.status = 'active';
           t.isConfigured = true;
         }
@@ -1385,6 +1988,7 @@ app.post('/api/workflows/:businessId/suggest', requireAuth, (req: Request, res: 
     subscribedToolIds,
     allAgentsSubscribed,
     plan: biz.plan?.name,
+    businessEmail: biz.email || biz.ownerEmail || 'shivamawasthi1129@gmail.com',
   });
   res.json({ success: true, suggestion });
 });
@@ -1398,6 +2002,9 @@ app.post('/api/workflows/:businessId/:workflowId/run', requireAuth, async (req: 
   const wf = clientWorkflow || workflows.find((w: any) => w.id === workflowId);
   // Synthesize a full, informative prompt from the available inputs
   let runPrompt = prompt || triggerData?.prompt || wf?.originalPrompt;
+
+  const currentBiz = businessesStore.get(businessId) || DEFAULT_BUSINESS;
+  const resolvedBizEmail = currentBiz.email || currentBiz.ownerEmail || 'shivamawasthi1129@gmail.com';
 
   if (!runPrompt) {
     const parts: string[] = [];
@@ -1413,6 +2020,16 @@ app.post('/api/workflows/:businessId/:workflowId/run', requireAuth, async (req: 
     if (triggerData?.recipientPhone) parts.push(`phone: ${triggerData.recipientPhone}`);
     if (triggerData?.service) parts.push(`service: ${triggerData.service}`);
     runPrompt = parts.length > 0 ? parts.join(', ') : (wf ? `${wf.name}: ${wf.description}` : 'Execute workflow');
+  }
+
+  // If user says "to my email", "send to my email", "to me", resolve recipient to business email
+  if (/my\s+email|to\s+me|send\s+it\s+to\s+my|send\s+to\s+my/i.test(runPrompt)) {
+    if (triggerData) {
+      triggerData.recipientEmail = resolvedBizEmail;
+    }
+    if (!runPrompt.toLowerCase().includes(resolvedBizEmail.toLowerCase())) {
+      runPrompt = `send email to ${resolvedBizEmail}, ${runPrompt}`;
+    }
   }
 
   // Ensure recipient email is in runPrompt if triggerData has it
@@ -1450,12 +2067,55 @@ app.post('/api/workflows/:businessId/:workflowId/run', requireAuth, async (req: 
     }
   }
 
+  // Ensure latest credentials from MongoDB are loaded
+  try {
+    const db = await getMongoDb();
+    if (db) {
+      const oDocs = await db.collection('oauth_connections').find({ businessId }).toArray();
+      for (const d of oDocs) {
+        if (d.provider) {
+          const existing = oauthConnectionsStore.get(`${businessId}_${d.provider}`) || {};
+          oauthConnectionsStore.set(`${businessId}_${d.provider}`, {
+            ...existing,
+            ...d,
+            clientId: d.clientId || d.credentials?.clientId || d.extraConfig?.clientId || existing.clientId || (d.provider.startsWith('google') ? process.env.GOOGLE_CLIENT_ID : undefined),
+            clientSecret: d.clientSecret || d.credentials?.clientSecret || d.extraConfig?.clientSecret || existing.clientSecret || (d.provider.startsWith('google') ? process.env.GOOGLE_CLIENT_SECRET : undefined),
+            refreshToken: d.refreshToken || d.credentials?.refreshToken || d.extraConfig?.refreshToken || existing.refreshToken,
+            accessToken: d.accessToken || d.credentials?.accessToken || d.extraConfig?.accessToken || existing.accessToken,
+          });
+        }
+      }
+      const tDocs = await db.collection('tool_configurations').find({ businessId }).toArray();
+      for (const tc of tDocs) {
+        if (tc.toolId && tc.config) {
+          toolConfigStore.set(`${businessId}_${tc.toolId}`, tc.config);
+        }
+      }
+    }
+  } catch {}
+
   const tenantKeys = getTenantKeysForBusiness(businessId);
+  if (triggerData?.twilioVoice) {
+    tenantKeys.twilioVoice = String(triggerData.twilioVoice).trim();
+  }
+
+  const biz = businessesStore.get(businessId) || DEFAULT_BUSINESS;
+  const businessServices = (biz.services && biz.services.length > 0)
+    ? biz.services.join(', ')
+    : 'Healthcare, Aesthetic & Medical Treatments, Consultations';
+  const businessHours = biz.hours || 'Monday through Friday from 9:00 AM to 6:00 PM, Saturday from 10:00 AM to 4:00 PM';
+  const resolvedTenantContext = `Business: ${biz.name}
+Owner: ${biz.ownerName || 'Dr. ' + biz.name}
+Location: ${biz.location || 'New York'}
+Tone: ${biz.tone || 'Warm, professional, and helpful'}
+Available Services: ${businessServices}
+Operating & Available Timings: ${businessHours}`;
 
   try {
     const result = await dispatchWorkflow({
       prompt: runPrompt,
       tenantId: businessId,
+      tenantContext: resolvedTenantContext,
       tenantKeys,
       triggerData,
       overrideWorkflow: wf && Array.isArray(wf.steps) && wf.steps.length > 0 ? {
@@ -1699,6 +2359,524 @@ app.put('/api/business/:id', requireAuth, (req: Request, res: Response) => {
   savePersistentStores();
   const { passwordHash: _ph2, ...publicUpdated } = updated;
   return res.json({ success: true, business: publicUpdated });
+});
+
+// =============================================================================
+// ─── ElevenLabs Ultra-Realistic Voice Layer Endpoints ─────────────────────────
+// Generates and streams human-quality AI voice audio over Twilio telephony calls.
+// =============================================================================
+
+// GET /api/voice/elevenlabs/audio/:id.mp3 — Serves cached ElevenLabs MP3 audio to Twilio <Play>
+app.get(['/api/voice/elevenlabs/audio/:id.mp3', '/api/voice/elevenlabs/audio/:id'], (req: Request, res: Response) => {
+  const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const cacheId = String(rawId || '').replace(/\.mp3$/, '');
+  const cached = elevenLabsAudioCache.get(cacheId);
+  if (!cached) {
+    return res.status(404).send('Audio not found or expired');
+  }
+  res.set('Content-Type', cached.contentType || 'audio/mpeg');
+  res.set('Cache-Control', 'public, max-age=86400');
+  return res.send(cached.buffer);
+});
+
+// GET /api/voice/elevenlabs/tts — Dynamic ElevenLabs speech synthesis stream
+app.get('/api/voice/elevenlabs/tts', async (req: Request, res: Response) => {
+  try {
+    const text = String(req.query.text || '').trim();
+    if (!text) {
+      return res.status(400).send('Text parameter is required');
+    }
+    const businessId = String(req.query.businessId || DEFAULT_BUSINESS.id).trim();
+    const keys = getTenantKeysForBusiness(businessId);
+    const voiceId = String(req.query.voiceId || keys.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM').trim();
+    const apiKey = String(req.query.apiKey || keys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY || '').trim();
+    const modelId = String(req.query.modelId || keys.elevenLabsModel || 'eleven_turbo_v2_5').trim();
+
+    const audioResult = await generateElevenLabsAudioBuffer({
+      text,
+      voiceId,
+      apiKey,
+      modelId,
+      stability: keys.elevenLabsStability,
+      similarityBoost: keys.elevenLabsSimilarity,
+    });
+
+    if (!audioResult) {
+      return res.status(500).send('ElevenLabs speech generation failed');
+    }
+
+    res.set('Content-Type', 'audio/mpeg');
+    res.set('Cache-Control', 'public, max-age=86400');
+    return res.send(audioResult.buffer);
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : 'Unknown ElevenLabs TTS error';
+    return res.status(500).send(errorMsg);
+  }
+});
+
+// POST /api/voice/elevenlabs/preview — Live Voice Preview Player for Frontend Configuration Panel
+app.post('/api/voice/elevenlabs/preview', async (req: Request, res: Response) => {
+  try {
+    const { text, voiceId, apiKey, modelId, stability, similarityBoost, businessId } = req.body;
+    const sampleText = String(text || 'Hello! This is HeyTam speaking with ultra-realistic ElevenLabs AI voice. How may I assist you today?').trim();
+    const keys = getTenantKeysForBusiness(businessId || DEFAULT_BUSINESS.id);
+    const targetApiKey = String(apiKey || keys.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY || '').trim();
+    const targetVoiceId = String(voiceId || keys.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM').trim();
+    const targetModel = String(modelId || keys.elevenLabsModel || 'eleven_turbo_v2_5').trim();
+
+    if (!targetApiKey) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please enter your ElevenLabs API key in the configuration panel to preview audio.',
+      });
+    }
+
+    const audioResult = await generateElevenLabsAudioBuffer({
+      text: sampleText,
+      voiceId: targetVoiceId,
+      apiKey: targetApiKey,
+      modelId: targetModel,
+      stability: typeof stability === 'number' ? stability : 0.50,
+      similarityBoost: typeof similarityBoost === 'number' ? similarityBoost : 0.75,
+    });
+
+    if (!audioResult) {
+      const lastErr = getElevenLabsLastError() || 'Please check your API key, voice selection, and subscription status.';
+      return res.status(400).json({
+        success: false,
+        error: `ElevenLabs generation failed: ${lastErr}`,
+      });
+    }
+
+    const publicBase = getPublicBackendUrl();
+    const audioUrl = `${publicBase}/api/voice/elevenlabs/audio/${audioResult.cacheId}.mp3`;
+    return res.json({
+      success: true,
+      cacheId: audioResult.cacheId,
+      audioUrl,
+      voiceId: targetVoiceId,
+      modelId: targetModel,
+    });
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : 'Unknown preview error';
+    return res.status(500).json({ success: false, error: errorMsg });
+  }
+});
+
+// GET /api/voice/elevenlabs/voices — Curated & Custom Cloned Voice Catalog
+app.get('/api/voice/elevenlabs/voices', async (req: Request, res: Response) => {
+  const apiKey = String(req.query.apiKey || process.env.ELEVENLABS_API_KEY || '').trim();
+  const curated = ELEVENLABS_VOICES;
+  let customVoices: any[] = [];
+
+  if (apiKey) {
+    try {
+      const elRes = await fetch('https://api.elevenlabs.io/v1/voices', {
+        headers: { 'xi-api-key': apiKey },
+      });
+      if (elRes.ok) {
+        const data = await elRes.json();
+        customVoices = (data.voices || []).map((v: any) => ({
+          value: v.voice_id,
+          label: `✨ ${v.name} (${v.labels?.gender || 'Voice'} · ${v.category || 'Cloned'})`,
+          category: v.category,
+        }));
+      }
+    } catch (e) {
+      console.warn('[ElevenLabs] Failed to fetch custom voices:', e);
+    }
+  }
+
+  return res.json({ voices: curated, customVoices });
+});
+
+// =============================================================================
+// ─── Interactive Conversational Voice Webhooks & Real-time Call Management ────
+// Handles Twilio Speech-to-Text (<Gather>), LLM reasoning, voice pack selection,
+// and live streaming of customer conversation into HeyTam Orchestrator.
+// =============================================================================
+
+// POST & GET /api/voice/webhook/turn — Processes each spoken dialogue turn from Twilio STT
+app.all(['/api/voice/webhook/turn', '/api/voice/webhook/turns'], async (req: Request, res: Response) => {
+  try {
+    const speechResult = String(req.body?.SpeechResult || req.query?.SpeechResult || '').trim();
+    const callSid = String(req.body?.CallSid || req.query?.CallSid || `CALL_${Date.now()}`).trim();
+    const fromPhone = String(req.body?.From || req.query?.From || 'Customer').trim();
+    const toPhone = String(req.body?.To || req.query?.To || '').trim();
+    const direction = String(req.query?.direction || req.body?.direction || 'outbound');
+
+    // Extract or resolve business and run context
+    let businessId = String(req.query?.businessId || req.body?.businessId || '').trim();
+    let runId = String(req.query?.runId || req.body?.runId || '').trim();
+    let targetVoice = String(req.query?.voice || req.body?.voice || '').trim();
+
+    // If session already exists, inherit its parameters
+    let session = getCallSession(callSid);
+    if (session) {
+      if (!businessId) businessId = session.businessId;
+      if (!runId && session.runId) runId = session.runId;
+      if (!targetVoice && session.voice) targetVoice = session.voice;
+    }
+
+    // Fallback business lookup by To phone
+    if (!businessId && toPhone) {
+      for (const [bId, conn] of oauthConnectionsStore.entries()) {
+        if (conn?.credentials?.twilioFromPhone === toPhone) {
+          businessId = conn.businessId;
+          break;
+        }
+      }
+    }
+    if (!businessId) businessId = DEFAULT_BUSINESS.id;
+
+    const biz = businessesStore.get(businessId) || DEFAULT_BUSINESS;
+    const bizKeys = getTenantKeysForBusiness(businessId);
+    if (!targetVoice) {
+      targetVoice = bizKeys.elevenLabsVoiceId || bizKeys.twilioVoice || 'ElevenLabs-Rachel';
+    }
+
+    if (!session) {
+      session = {
+        callSid,
+        businessId,
+        runId: runId || undefined,
+        from: fromPhone,
+        to: toPhone,
+        direction: direction as 'inbound' | 'outbound',
+        voice: targetVoice,
+        status: 'in-progress',
+        startedAt: new Date().toISOString(),
+        turns: [],
+      };
+      upsertCallSession(session);
+    }
+
+    const publicBase = getPublicBackendUrl();
+    const turnUrl = `${publicBase}/api/voice/webhook/turn?businessId=${encodeURIComponent(businessId)}&runId=${encodeURIComponent(runId)}&voice=${encodeURIComponent(targetVoice)}&direction=${encodeURIComponent(direction)}`;
+
+    // 1. If customer spoke (SpeechResult captured by Twilio STT)
+    if (speechResult) {
+      const nowIso = new Date().toISOString();
+      // Record customer turn
+      session.turns.push({
+        role: 'customer',
+        text: speechResult,
+        timestamp: nowIso,
+        confidence: Number(req.body?.Confidence) || 0.95,
+      });
+
+      // Stream customer speech directly to HeyTam Orchestrator
+      const customerLog = `[${nowIso}] [📞 Live Voice Call - ${callSid.slice(-6)}] 👤 Customer: "${speechResult}"`;
+      console.log(`[Twilio Webhook] ${customerLog}`);
+      logToOrchestrator(runId, customerLog, {
+        customerSpeech: speechResult,
+        voice: targetVoice,
+        callSid,
+      });
+
+      // Autonomous AI Spoken Response Generation
+      const { replyText, isClosing } = await generateAiVoiceReply({
+        businessName: biz.name || 'HeyTam Clinic',
+        businessServices: biz.services || ['Eye Care', 'Consultations', 'Appointments'],
+        businessTone: biz.tone || 'Warm, empathetic, and professional',
+        history: session.turns,
+        customerSpeech: speechResult,
+        openaiApiKey: bizKeys.openaiApiKey || process.env.OPENAI_API_KEY,
+      });
+
+      // Record AI turn
+      const aiTimestamp = new Date().toISOString();
+      session.turns.push({
+        role: 'ai',
+        text: replyText,
+        timestamp: aiTimestamp,
+        voice: targetVoice,
+      });
+
+      // Stream AI response directly to HeyTam Orchestrator
+      const aiLog = `[${aiTimestamp}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🤖 AI (${targetVoice}): "${replyText}"`;
+      console.log(`[Twilio Webhook] ${aiLog}`);
+      logToOrchestrator(runId, aiLog, {
+        aiReply: replyText,
+        voice: targetVoice,
+        callSid,
+      });
+
+      // Synthesize ElevenLabs voice reply if configured
+      let audioUrl: string | null = null;
+      const useElevenLabs = bizKeys?.useElevenLabs || Boolean(bizKeys?.elevenLabsApiKey);
+      if (useElevenLabs && bizKeys?.elevenLabsApiKey) {
+        try {
+          const elVoiceId = bizKeys.elevenLabsVoiceId || 'TxGEqnHWrfWFTfGW9XjX';
+          const elAudio = await generateElevenLabsAudioBuffer({
+            text: replyText,
+            voiceId: elVoiceId,
+            apiKey: bizKeys.elevenLabsApiKey,
+            modelId: bizKeys.elevenLabsModel || 'eleven_turbo_v2_5',
+            stability: bizKeys.elevenLabsStability,
+            similarityBoost: bizKeys.elevenLabsSimilarity,
+          });
+          if (elAudio?.cacheId) {
+            audioUrl = `${publicBase}/api/voice/elevenlabs/audio/${elAudio.cacheId}.mp3`;
+            logToOrchestrator(
+              runId,
+              `[${new Date().toISOString()}] [🎙️ ElevenLabs AI Voice] Spoken turn synthesized via ElevenLabs [${elVoiceId}]. Streaming over call via <Play>.`,
+              { voice: elVoiceId, callSid }
+            );
+          } else {
+            const lastErr = getElevenLabsLastError() || 'Subscription payment issue or quota exceeded';
+            logToOrchestrator(
+              runId,
+              `[${new Date().toISOString()}] [⚠️ ElevenLabs Warning] ElevenLabs synthesis failed (${lastErr}). Falling back to Twilio Neural Voice [${resolveTwilioPollyVoice(targetVoice)}].`,
+              { voice: targetVoice, callSid }
+            );
+          }
+        } catch (elErr: any) {
+          logToOrchestrator(
+            runId,
+            `[${new Date().toISOString()}] [⚠️ ElevenLabs Error] ${elErr.message}. Falling back to Twilio Neural Voice [${resolveTwilioPollyVoice(targetVoice)}].`,
+            { voice: targetVoice, callSid }
+          );
+        }
+      }
+
+      if (isClosing || session.turns.length >= 16) {
+        logToOrchestrator(
+          runId,
+          `[${new Date().toISOString()}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🏁 Call completed successfully with customer.`
+        );
+        session.status = 'completed';
+        session.endedAt = new Date().toISOString();
+        savePersistentStores();
+
+        const closingTwiML = generateClosingTwiML({ speech: replyText, voice: targetVoice, audioUrl });
+        return res.type('text/xml').send(closingTwiML);
+      }
+
+      // Continue back-and-forth conversation loop
+      savePersistentStores();
+      const nextTwiML = generateGatherTwiML({
+        speech: replyText,
+        voice: targetVoice,
+        turnUrl,
+        isEnding: false,
+        audioUrl,
+      });
+      return res.type('text/xml').send(nextTwiML);
+    }
+
+    // 2. Customer was silent or speech recognition timed out
+    const silenceTurns = session.turns.filter(t => t.text.includes("didn't hear") || t.text.includes("didn't catch")).length;
+    if (silenceTurns < 2) {
+      const promptRepeat = `I'm sorry, I didn't quite catch that. Could you please repeat?`;
+      session.turns.push({
+        role: 'ai',
+        text: promptRepeat,
+        timestamp: new Date().toISOString(),
+        voice: targetVoice,
+      });
+      logToOrchestrator(
+        runId,
+        `[${new Date().toISOString()}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🤖 AI (${targetVoice}): "${promptRepeat}"`
+      );
+
+      const repeatTwiML = generateGatherTwiML({
+        speech: promptRepeat,
+        voice: targetVoice,
+        turnUrl,
+        isEnding: false,
+      });
+      return res.type('text/xml').send(repeatTwiML);
+    } else {
+      const farewell = `Thank you for connecting with ${biz.name || 'HeyTam'}. If you need anything else, please reach back out anytime. Have a wonderful day!`;
+      session.status = 'completed';
+      session.endedAt = new Date().toISOString();
+      savePersistentStores();
+      logToOrchestrator(
+        runId,
+        `[${new Date().toISOString()}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🏁 Call ended due to inactivity.`
+      );
+
+      const closeTwiML = generateClosingTwiML({ speech: farewell, voice: targetVoice });
+      return res.type('text/xml').send(closeTwiML);
+    }
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : 'Unknown voice webhook error';
+    console.error('[Twilio Webhook Error]', err);
+    const fallbackTwiML = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna-Neural">Thank you for calling. Our team will follow up with you shortly. Goodbye!</Say>
+  <Hangup/>
+</Response>`;
+    return res.type('text/xml').send(fallbackTwiML);
+  }
+});
+
+// POST & GET /api/voice/webhook/inbound — Inbound Call Receptionist
+app.all(['/api/voice/webhook/inbound', '/api/voice/inbound'], async (req: Request, res: Response) => {
+  try {
+    const callSid = String(req.body?.CallSid || req.query?.CallSid || `INBOUND_${Date.now()}`).trim();
+    const callerNumber = String(req.body?.From || req.query?.From || 'Unknown Caller').trim();
+    const calledNumber = String(req.body?.To || req.query?.To || '').trim();
+
+    // Identify business
+    let businessId = String(req.query?.businessId || req.body?.businessId || '').trim();
+    if (!businessId && calledNumber) {
+      for (const [bId, conn] of oauthConnectionsStore.entries()) {
+        if (conn?.credentials?.twilioFromPhone === calledNumber) {
+          businessId = conn.businessId;
+          break;
+        }
+      }
+    }
+    if (!businessId) businessId = DEFAULT_BUSINESS.id;
+
+    const biz = businessesStore.get(businessId) || DEFAULT_BUSINESS;
+    const bizKeys = getTenantKeysForBusiness(businessId);
+    const targetVoice = String(req.query?.voice || bizKeys.elevenLabsVoiceId || bizKeys.twilioVoice || '21m00Tcm4TlvDq8ikWAM').trim();
+
+    // Create a live workflow run for this incoming call so it streams in the Orchestrator
+    const runId = `run_inbound_${Date.now()}`;
+    const greetingText = `Hello! Thank you for calling ${biz.name || 'HeyTam'}. This is your AI front-desk receptionist. How can I assist you today?`;
+
+    const inboundRun = {
+      id: runId,
+      runId,
+      businessId,
+      workflowId: 'inbound-receptionist-call',
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      orchestratorLog: [
+        `[${new Date().toISOString()}] [HeyTam Core Supervisor] 📞 Incoming call detected from ${callerNumber} to ${biz.name || 'HeyTam'} (${calledNumber || 'Reception'})`,
+        `[${new Date().toISOString()}] [HeyTam Core Supervisor] Assigned to AI Voice Receptionist Pod with voice [${targetVoice}]`,
+        `[${new Date().toISOString()}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🤖 AI (${targetVoice}): "${greetingText}"`,
+        `[${new Date().toISOString()}] [📞 Live Voice Call - ${callSid.slice(-6)}] 👂 Listening for caller's spoken response via Twilio STT...`,
+      ],
+      steps: [{
+        order: 1,
+        agentId: 'receptionist-agent',
+        agentName: 'AI Voice Receptionist',
+        status: 'running',
+        output: `🤖 AI Receptionist: "${greetingText}"`,
+        logs: [
+          `Inbound call connected: CallSid ${callSid}`,
+          `Greeting caller ${callerNumber} using Twilio voice ${targetVoice}`,
+        ],
+      }],
+      finalOutput: 'Inbound conversation active',
+    };
+    workflowRunsStore.set(runId, inboundRun);
+
+    // Register active call session
+    const session: CallSession = {
+      callSid,
+      businessId,
+      runId,
+      stepOrder: 1,
+      from: callerNumber,
+      to: calledNumber,
+      direction: 'inbound',
+      voice: targetVoice,
+      status: 'in-progress',
+      startedAt: new Date().toISOString(),
+      turns: [{
+        role: 'ai',
+        text: greetingText,
+        timestamp: new Date().toISOString(),
+        voice: targetVoice,
+      }],
+    };
+    upsertCallSession(session);
+    savePersistentStores();
+
+    const publicBase = getPublicBackendUrl();
+    const turnUrl = `${publicBase}/api/voice/webhook/turn?businessId=${encodeURIComponent(businessId)}&runId=${encodeURIComponent(runId)}&voice=${encodeURIComponent(targetVoice)}&direction=inbound`;
+
+    let audioUrl: string | null = null;
+    const useElevenLabs = bizKeys?.useElevenLabs || Boolean(bizKeys?.elevenLabsApiKey);
+    if (useElevenLabs && bizKeys?.elevenLabsApiKey) {
+      try {
+        const elVoiceId = bizKeys.elevenLabsVoiceId || 'TxGEqnHWrfWFTfGW9XjX';
+        const elAudio = await generateElevenLabsAudioBuffer({
+          text: greetingText,
+          voiceId: elVoiceId,
+          apiKey: bizKeys.elevenLabsApiKey,
+          modelId: bizKeys.elevenLabsModel || 'eleven_turbo_v2_5',
+          stability: bizKeys.elevenLabsStability,
+          similarityBoost: bizKeys.elevenLabsSimilarity,
+        });
+        if (elAudio?.cacheId) {
+          audioUrl = `${publicBase}/api/voice/elevenlabs/audio/${elAudio.cacheId}.mp3`;
+        }
+      } catch {}
+    }
+
+    const twiml = generateGatherTwiML({
+      speech: greetingText,
+      voice: targetVoice,
+      turnUrl,
+      isEnding: false,
+      audioUrl,
+    });
+
+    res.type('text/xml').send(twiml);
+  } catch (err: unknown) {
+    console.error('[Inbound Voice Error]', err);
+    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna-Neural">Thank you for calling. Please leave a message or reach back out shortly. Goodbye!</Say>
+  <Hangup/>
+</Response>`);
+  }
+});
+
+// POST & GET /api/voice/webhook/status — Call Termination & Status Callback
+app.all(['/api/voice/webhook/status', '/api/voice/status'], (req: Request, res: Response) => {
+  const callSid = String(req.body?.CallSid || req.query?.CallSid || '').trim();
+  const callStatus = String(req.body?.CallStatus || req.query?.CallStatus || 'completed').trim();
+  const duration = Number(req.body?.CallDuration || req.query?.CallDuration || 0);
+
+  if (callSid) {
+    const session = getCallSession(callSid);
+    if (session) {
+      session.status = callStatus as any;
+      session.durationSeconds = duration;
+      session.endedAt = new Date().toISOString();
+
+      if (session.runId) {
+        logToOrchestrator(
+          session.runId,
+          `[${new Date().toISOString()}] [📞 Live Voice Call - ${callSid.slice(-6)}] 🏁 Call concluded (Status: ${callStatus}, Spoken Duration: ${duration}s)`
+        );
+        const run = workflowRunsStore.get(session.runId);
+        if (run && run.status === 'running' && session.direction === 'inbound') {
+          run.status = 'completed';
+          run.completedAt = new Date().toISOString();
+        }
+      }
+      savePersistentStores();
+    }
+  }
+
+  res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response/>');
+});
+
+// GET /api/voice/calls/:businessId — List call sessions and transcripts
+app.get('/api/voice/calls/:businessId', requireAuth, (req: Request, res: Response) => {
+  const businessId = (req as AuthenticatedRequest).businessId;
+  const calls = getCallSessionsForBusiness(businessId);
+  res.json({ success: true, calls, count: calls.length });
+});
+
+// GET /api/voice/calls/:businessId/:callSid — Get single call details
+app.get('/api/voice/calls/:businessId/:callSid', requireAuth, (req: Request, res: Response) => {
+  const businessId = (req as AuthenticatedRequest).businessId;
+  const callSid = String(req.params.callSid);
+  const session = getCallSession(callSid);
+  if (!session || session.businessId !== businessId) {
+    return res.status(404).json({ error: 'Call session not found' });
+  }
+  res.json({ success: true, session });
 });
 
 // ─── 404 Handler ──────────────────────────────────────────────────────────────

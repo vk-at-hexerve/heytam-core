@@ -73,6 +73,31 @@ const smsProviderField: ConfigField = {
   ],
 };
 
+export const ELEVENLABS_VOICE_PACKS = [
+  { value: '21m00Tcm4TlvDq8ikWAM', label: '🌸 Rachel (Female US · Calm, Warm & Professional) [Default]' },
+  { value: 'pNInz6obpgDQGcFmaJgB', label: '👔 Adam (Male US · Deep, Confident & Engaging)' },
+  { value: 'ErXwobaYiN019PkySvjV', label: '🎙️ Antoni (Male US · Natural & Conversational)' },
+  { value: 'EXAVITQu4vr4xnSDxMaL', label: '🌺 Bella (Female US · Vibrant & Expressive)' },
+  { value: 'TxGEqnHWrfWFTfGW9XjX', label: '🎧 Josh (Male US · Relatable & Dynamic)' },
+  { value: 'piTKgcLEGmPE4e6mEKli', label: '🕊️ Nicole (Female US · Soft & Empathetic)' },
+  { value: 'yoZ06aMxZJJ28mfd3POQ', label: '⚡ Sam (Male US · Dynamic & Clear)' },
+  { value: 'AZnzlk1XvdvUeBnXmlld', label: '🌟 Domi (Female US · Strong Narrative)' },
+];
+
+export const TWILIO_VOICE_PACKS = [
+  ...ELEVENLABS_VOICE_PACKS,
+  { value: 'Polly.Joanna-Neural', label: 'Polly Joanna (US Neural Female)' },
+  { value: 'Polly.Matthew-Neural', label: 'Polly Matthew (US Neural Male)' },
+  { value: 'Polly.Kajal-Neural', label: 'Polly Kajal (IN Neural Female)' },
+];
+
+const twilioCallingFields: ConfigField[] = [
+  { key: 'twilioAccountSid', label: 'Twilio Account SID / API Key SID', type: 'text', placeholder: 'ACxxxxxxxx... or SKxxxxxxxx...', required: true, dependsOn: { field: 'provider', value: 'twilio' } },
+  { key: 'twilioAuthToken', label: 'Twilio Auth Token / Secret', type: 'password', placeholder: 'Your auth token or secret', required: true, dependsOn: { field: 'provider', value: 'twilio' } },
+  { key: 'twilioApiKeySecret', label: 'Twilio Client Secret (Optional, for API Key SID)', type: 'password', placeholder: 'API Key Client Secret', required: false, dependsOn: { field: 'provider', value: 'twilio' } },
+  { key: 'twilioFromPhone', label: 'Twilio Phone Number', type: 'text', placeholder: '+15551234567', required: true, dependsOn: { field: 'provider', value: 'twilio' } },
+];
+
 const twilioFields: ConfigField[] = [
   { key: 'twilioAccountSid', label: 'Twilio Account SID / API Key SID', type: 'text', placeholder: 'ACxxxxxxxx... or SKxxxxxxxx...', required: true, dependsOn: { field: 'provider', value: 'twilio' } },
   { key: 'twilioAuthToken', label: 'Twilio Auth Token / Secret', type: 'password', placeholder: 'Your auth token or secret', required: true, dependsOn: { field: 'provider', value: 'twilio' } },
@@ -97,6 +122,78 @@ const vonageFields: ConfigField[] = [
   { key: 'vonageFromNumber', label: 'Vonage Phone Number', type: 'text', placeholder: '+15551234567', required: true, dependsOn: { field: 'provider', value: 'vonage' } },
 ];
 
+export const ELEVENLABS_VOICES = [
+  { value: '21m00Tcm4TlvDq8ikWAM', label: '🌸 Rachel (Female US · Calm, Warm & Professional — Best for Healthcare & Reception)' },
+  { value: 'pNInz6obpgDQGcFmaJgB', label: '👔 Adam (Male US · Deep, Confident & Engaging — Best for Sales & Consultations)' },
+  { value: 'ErXwobaYiN019PkySvjV', label: '🎙️ Antoni (Male US · Natural, Gentle & Articulate — Best for Customer Support)' },
+  { value: 'EXAVITQu4vr4xnSDxMaL', label: '🌺 Bella (Female US · Vibrant, Friendly & Expressive — Best for Inbound Greetings)' },
+  { value: 'TxGEqnHWrfWFTfGW9XjX', label: '🎧 Josh (Male US · Young, Dynamic & Relatable)' },
+  { value: 'piTKgcLEGmPE4e6mEKli', label: '🕊️ Nicole (Female US · Soft, Empathetic & Comforting)' },
+  { value: 'yoZ06aMxZJJ28mfd3POQ', label: '⚡ Sam (Male US · Dynamic, Persuasive & Clear)' },
+  { value: 'AZnzlk1XvdvUeBnXmlld', label: '🌟 Domi (Female US · Strong, Empathetic Narrative)' },
+  { value: 'custom', label: '✨ Custom Cloned Voice ID (Enter your ElevenLabs voice ID below)' },
+];
+
+const elevenLabsVoiceFields: ConfigField[] = [
+  {
+    key: 'useElevenLabs',
+    label: 'Voice Layer Engine',
+    type: 'select',
+    options: [
+      { value: 'true', label: '⚡ ElevenLabs Ultra-Realistic AI Voice Layer (Recommended)' },
+      { value: 'false', label: '📞 Twilio Native Polly Voice Pack' },
+    ],
+    helpText: 'When enabled, HeyTam generates human-grade speech via ElevenLabs and streams it through Twilio telephone calls.',
+  },
+  {
+    key: 'elevenLabsApiKey',
+    label: 'ElevenLabs API Key',
+    type: 'password',
+    placeholder: 'xi-... (from elevenlabs.io)',
+    helpText: 'Your ElevenLabs API key. If left blank, falls back to system defaults.',
+  },
+  {
+    key: 'elevenLabsVoiceId',
+    label: 'ElevenLabs Voice Persona',
+    type: 'select',
+    options: ELEVENLABS_VOICES,
+    helpText: 'Select the human-sounding voice persona for telephone calls.',
+  },
+  {
+    key: 'elevenLabsCustomVoiceId',
+    label: 'Custom Voice ID (Optional)',
+    type: 'text',
+    placeholder: 'e.g. 21m00Tcm4TlvDq8ikWAM or cloned voice ID',
+    helpText: 'Enter your custom cloned voice ID from ElevenLabs if Custom Voice is selected.',
+    dependsOn: { field: 'elevenLabsVoiceId', value: 'custom' },
+  },
+  {
+    key: 'elevenLabsModel',
+    label: 'AI Voice Model (Latency / Quality)',
+    type: 'select',
+    options: [
+      { value: 'eleven_turbo_v2_5', label: '⚡ Eleven Turbo v2.5 (Fastest · Low Latency for Live Phone Calls)' },
+      { value: 'eleven_multilingual_v2', label: '🌟 Eleven Multilingual v2 (Maximum Expressiveness & Realism)' },
+      { value: 'eleven_flash_v2', label: '🚀 Eleven Flash v2 (Ultra-fast streaming)' },
+    ],
+    helpText: 'Turbo v2.5 delivers ultra-low response latency (~250ms) for natural phone conversations.',
+  },
+  {
+    key: 'elevenLabsStability',
+    label: 'Voice Stability (0.0 to 1.0)',
+    type: 'text',
+    placeholder: '0.50',
+    helpText: 'Higher = consistent and steady tone. Lower = expressive and dynamic.',
+  },
+  {
+    key: 'elevenLabsSimilarity',
+    label: 'Clarity / Similarity Boost (0.0 to 1.0)',
+    type: 'text',
+    placeholder: '0.75',
+    helpText: 'Higher = stricter adherence to target voice tone and clear pronunciation.',
+  },
+];
+
 const callingCommonFields: ConfigField[] = [
   { key: 'webhookCallbackUrl', label: 'Webhook Callback URL (optional)', type: 'url', placeholder: 'https://your-server.com/webhook/calls', helpText: 'Receives call status updates.' },
   { key: 'businessHoursStart', label: 'Business Hours Start', type: 'text', placeholder: '09:00', helpText: 'e.g., 09:00 (24h format)' },
@@ -106,13 +203,18 @@ const callingCommonFields: ConfigField[] = [
 
 const callingConfigSections: ToolConfigSection[] = [
   {
+    sectionKey: 'elevenlabs_voice_layer',
+    sectionLabel: '🎙️ ElevenLabs AI Voice Layer (Primary — Ultra-Realistic Human Speech)',
+    fields: elevenLabsVoiceFields,
+  },
+  {
     sectionKey: 'provider_creds',
-    sectionLabel: 'Provider & Credentials',
-    fields: [callingProviderField, ...twilioFields, ...plivoFields, ...telnyxFields, ...vonageFields],
+    sectionLabel: 'Telephony Carrier (Twilio — for call routing only)',
+    fields: [callingProviderField, ...twilioCallingFields, ...plivoFields, ...telnyxFields, ...vonageFields],
   },
   {
     sectionKey: 'calling_settings',
-    sectionLabel: 'Calling Settings',
+    sectionLabel: 'Calling Schedule & Controls',
     fields: callingCommonFields,
   },
 ];
@@ -207,14 +309,36 @@ const calendarConfigSections: ToolConfigSection[] = [
         type: 'select',
         required: true,
         options: [
-          { value: 'google_calendar', label: 'Google Calendar' },
+          { value: 'google_calendar', label: 'Google Calendar (Recommended — OAuth)' },
           { value: 'calendly', label: 'Calendly' },
           { value: 'ghl_calendar', label: 'GoHighLevel Calendar' },
           { value: 'acuity', label: 'Acuity Scheduling' },
         ],
       },
-      { key: 'googleCalendarId', label: 'Google Calendar ID', type: 'email', placeholder: 'appointments@yourclinic.com', dependsOn: { field: 'provider', value: 'google_calendar' } },
-      { key: 'googleServiceAccountKey', label: 'Google Service Account JSON Key', type: 'password', placeholder: 'Paste the full JSON key here', helpText: 'Download from Google Cloud Console → IAM → Service Accounts', dependsOn: { field: 'provider', value: 'google_calendar' } },
+      {
+        key: 'googleCalendarId',
+        label: 'Google Calendar ID (Email Address)',
+        type: 'email',
+        placeholder: 'appointments@yourclinic.com or your@gmail.com',
+        helpText: '✅ Recommended: Click "1-Click Fast Connect" above to connect via Google OAuth (no JSON key needed). The calendar ID is your Gmail/Google Workspace email address.',
+        dependsOn: { field: 'provider', value: 'google_calendar' },
+      },
+      {
+        key: 'googleClientId',
+        label: 'Google OAuth Client ID (optional)',
+        type: 'text',
+        placeholder: 'xxx.apps.googleusercontent.com',
+        helpText: 'From Google Cloud Console → APIs & Services → Credentials. Only needed if using a custom OAuth app.',
+        dependsOn: { field: 'provider', value: 'google_calendar' },
+      },
+      {
+        key: 'googleClientSecret',
+        label: 'Google OAuth Client Secret (optional)',
+        type: 'password',
+        placeholder: 'GOCSPX-xxx...',
+        helpText: 'Only needed if using a custom OAuth app. Leave blank to use the default HeyTam integration.',
+        dependsOn: { field: 'provider', value: 'google_calendar' },
+      },
       { key: 'calendlyApiKey', label: 'Calendly API Key', type: 'password', placeholder: 'Your Calendly Personal Access Token', dependsOn: { field: 'provider', value: 'calendly' } },
       { key: 'calendlyEventUrl', label: 'Calendly Event URL', type: 'url', placeholder: 'https://calendly.com/yourname/consultation', dependsOn: { field: 'provider', value: 'calendly' } },
       { key: 'ghlApiKey', label: 'GoHighLevel API Key', type: 'password', placeholder: 'Your GHL API Key', dependsOn: { field: 'provider', value: 'ghl_calendar' } },
@@ -321,21 +445,95 @@ const webChatConfigSections: ToolConfigSection[] = [
   },
 ];
 
+const leadSourceConfigSections: ToolConfigSection[] = [
+  {
+    sectionKey: 'lead_source',
+    sectionLabel: '📊 Lead Source — Google Sheets, CRM & Data Connections',
+    fields: [
+      {
+        key: 'leadSourceType',
+        label: 'Lead Source Type',
+        type: 'select',
+        required: true,
+        options: [
+          { value: 'google_sheet', label: '📊 Google Sheets (Recommended)' },
+          { value: 'ghl_crm', label: '🔥 GoHighLevel CRM' },
+          { value: 'hubspot', label: '🟠 HubSpot CRM' },
+          { value: 'webhook', label: '🔗 Inbound Webhook / API' },
+          { value: 'csv_upload', label: '📁 CSV Upload (Manual)' },
+        ],
+        helpText: 'Where should this agent fetch leads from?',
+      },
+      {
+        key: 'googleSheetId',
+        label: 'Google Sheet ID',
+        type: 'text',
+        placeholder: 'e.g. 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms',
+        helpText: 'The ID from your Google Sheet URL: docs.google.com/spreadsheets/d/[SHEET_ID]/edit',
+        dependsOn: { field: 'leadSourceType', value: 'google_sheet' },
+      },
+      {
+        key: 'googleSheetRange',
+        label: 'Sheet Range (optional)',
+        type: 'text',
+        placeholder: 'Sheet1!A:Z or leave blank for all data',
+        helpText: 'Specific tab and column range to read leads from.',
+        dependsOn: { field: 'leadSourceType', value: 'google_sheet' },
+      },
+      {
+        key: 'ghlApiKey',
+        label: 'GoHighLevel API Key',
+        type: 'password',
+        placeholder: 'Your GHL private integration key',
+        dependsOn: { field: 'leadSourceType', value: 'ghl_crm' },
+      },
+      {
+        key: 'ghlLocationId',
+        label: 'GoHighLevel Location ID',
+        type: 'text',
+        placeholder: 'Your sub-account location ID',
+        dependsOn: { field: 'leadSourceType', value: 'ghl_crm' },
+      },
+      {
+        key: 'hubspotApiKey',
+        label: 'HubSpot API Key / Token',
+        type: 'password',
+        placeholder: 'pat-na1-xxx...',
+        dependsOn: { field: 'leadSourceType', value: 'hubspot' },
+      },
+      {
+        key: 'leadFilterStatus',
+        label: 'Filter by Lead Status (optional)',
+        type: 'text',
+        placeholder: 'e.g. new, qualified, cold',
+        helpText: 'Only process leads matching this status. Leave blank for all leads.',
+      },
+      {
+        key: 'maxLeadsPerRun',
+        label: 'Max Leads to Process per Run',
+        type: 'number',
+        placeholder: '50',
+        helpText: 'Limit the number of leads processed in one run to prevent overuse.',
+      },
+    ],
+  },
+];
+
 // ─── THE FULL 30-TOOL CATALOG ──────────────────────────────────────────────────
 
 export const TOOL_CATALOG: ToolMeta[] = [
   {
     id: 'lead-concierge',
     name: 'AI Lead Concierge',
-    description: 'Instant multi-channel lead engagement within seconds via SMS/WhatsApp/Email with intent capture.',
+    description: 'Lead ingestion, reading, parsing, and intake from Google Sheets, CRM, CSV, and inbound channels.',
     category: 'Communications AI',
-    icon: '💬',
+    icon: '📊',
     color: '#06b6d4',
     priceMonthly: 299,
-    capabilities: ['Sub-15s first contact', 'SMS & WhatsApp outreach', 'Intent capture', 'CRM sync'],
-    connectsTo: ['Phone / SMS', 'WhatsApp', 'CRM'],
+    capabilities: ['Google Sheets lead import', 'CRM lead ingestion', 'Intent capture & parsing', 'Multi-source lead intake'],
+    connectsTo: ['Google Sheets', 'CRM', 'CSV / Webhooks'],
     configSections: [
-      { sectionKey: 'sms_config', sectionLabel: 'SMS Configuration', fields: [smsProviderField, ...twilioFields, ...plivoFields, ...telnyxFields] },
+      ...leadSourceConfigSections,
       { sectionKey: 'crm_config', sectionLabel: 'CRM Sync (optional)', fields: crmConfigSections[0].fields },
     ],
   },
@@ -347,9 +545,9 @@ export const TOOL_CATALOG: ToolMeta[] = [
     icon: '✅',
     color: '#6366f1',
     priceMonthly: 249,
-    capabilities: ['Budget scoring', 'Intent analysis', 'Lead scoring 0-100', 'Hot lead escalation'],
-    connectsTo: ['CRM', 'Slack / Webhook'],
-    configSections: crmConfigSections,
+    capabilities: ['Budget scoring', 'Intent analysis', 'Lead scoring 0-100', 'Hot lead escalation', 'Google Sheets lead import'],
+    connectsTo: ['CRM', 'Slack / Webhook', 'Google Sheets'],
+    configSections: [...leadSourceConfigSections, ...crmConfigSections],
   },
   {
     id: 'voice-agent',
@@ -443,9 +641,9 @@ export const TOOL_CATALOG: ToolMeta[] = [
     icon: '🔔',
     color: '#f59e0b',
     priceMonthly: 199,
-    capabilities: ['Multi-touch sequences', 'SMS + email drips', 'Cold lead reactivation', 'n8n/Make webhooks'],
-    connectsTo: ['SMS', 'Email', 'Webhook'],
-    configSections: [...smsConfigSections, ...emailConfigSections],
+    capabilities: ['Multi-touch sequences', 'SMS + email drips', 'Cold lead reactivation', 'n8n/Make webhooks', 'Google Sheets lead import'],
+    connectsTo: ['SMS', 'Email', 'Webhook', 'Google Sheets'],
+    configSections: [...leadSourceConfigSections, ...emailConfigSections, ...smsConfigSections],
   },
   {
     id: 'upsell-agent',
@@ -455,9 +653,9 @@ export const TOOL_CATALOG: ToolMeta[] = [
     icon: '📈',
     color: '#06b6d4',
     priceMonthly: 249,
-    capabilities: ['Post-visit upsell sequences', 'Treatment recommendations', 'Personalized offers', 'Revenue tracking'],
-    connectsTo: ['SMS', 'Email', 'CRM'],
-    configSections: [...smsConfigSections, ...emailConfigSections],
+    capabilities: ['Post-visit upsell sequences', 'Treatment recommendations', 'Personalized offers', 'Revenue tracking', 'Google Sheets lead import'],
+    connectsTo: ['SMS', 'Email', 'CRM', 'Google Sheets'],
+    configSections: [...leadSourceConfigSections, ...smsConfigSections, ...emailConfigSections],
   },
   {
     id: 'membership-agent',
@@ -491,9 +689,9 @@ export const TOOL_CATALOG: ToolMeta[] = [
     icon: '📣',
     color: '#8b5cf6',
     priceMonthly: 349,
-    capabilities: ['Targeted campaigns', 'Patient segmentation', 'SMS & email blasts', 'Campaign analytics'],
-    connectsTo: ['SMS', 'Email', 'CRM'],
-    configSections: [...smsConfigSections, ...emailConfigSections],
+    capabilities: ['Targeted campaigns', 'Patient segmentation', 'SMS & email blasts', 'Campaign analytics', 'Google Sheets lead import'],
+    connectsTo: ['SMS', 'Email', 'CRM', 'Google Sheets'],
+    configSections: [...leadSourceConfigSections, ...smsConfigSections, ...emailConfigSections],
   },
   {
     id: 'referral-agent',
@@ -527,9 +725,9 @@ export const TOOL_CATALOG: ToolMeta[] = [
     icon: '🔄',
     color: '#06b6d4',
     priceMonthly: 249,
-    capabilities: ['Dormant patient detection', 'Personalized win-back sequences', 'Seasonal campaigns', 'Re-engagement scoring'],
-    connectsTo: ['SMS', 'Email', 'CRM'],
-    configSections: [...smsConfigSections, ...emailConfigSections],
+    capabilities: ['Dormant patient detection', 'Personalized win-back sequences', 'Seasonal campaigns', 'Re-engagement scoring', 'Google Sheets lead import'],
+    connectsTo: ['SMS', 'Email', 'CRM', 'Google Sheets'],
+    configSections: [...leadSourceConfigSections, ...smsConfigSections, ...emailConfigSections],
   },
   {
     id: 'no-show-prevention-agent',
@@ -680,9 +878,9 @@ export const TOOL_CATALOG: ToolMeta[] = [
     icon: '🚑',
     color: '#f43f5e',
     priceMonthly: 249,
-    capabilities: ['Lost lead detection', 'Personalized re-engagement', 'Multi-channel campaigns', 'Recovery rate tracking'],
-    connectsTo: ['SMS', 'Email', 'CRM'],
-    configSections: [...smsConfigSections, ...emailConfigSections, ...crmConfigSections],
+    capabilities: ['Lost lead detection', 'Personalized re-engagement', 'Multi-channel campaigns', 'Recovery rate tracking', 'Google Sheets lead import'],
+    connectsTo: ['SMS', 'Email', 'CRM', 'Google Sheets'],
+    configSections: [...leadSourceConfigSections, ...smsConfigSections, ...emailConfigSections, ...crmConfigSections],
   },
   {
     id: 'treatment-advisor',

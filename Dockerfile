@@ -26,6 +26,9 @@ RUN npm ci --omit=dev --legacy-peer-deps && npm cache clean --force
 # Copy compiled JS from builder
 COPY --from=builder /app/dist ./dist
 
+# Create persistent data directory with permissions for node user
+RUN mkdir -p /app/data && chown -R node:node /app/data
+
 # Kubernetes health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
   CMD wget -qO- http://localhost:${PORT}/health || exit 1

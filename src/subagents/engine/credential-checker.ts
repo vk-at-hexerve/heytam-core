@@ -60,16 +60,16 @@ const GOOGLE_CALENDAR: CredentialRequirement = {
   label: 'Google Calendar OAuth',
   purpose: 'create and manage real calendar events and appointments',
   configPath: 'Profile → Integrations → Connect Google Account',
-  requiredFields: ['googleRefreshToken', 'googleClientId', 'googleClientSecret'],
-  check: (k) => !!(k.googleRefreshToken && k.googleClientId && k.googleClientSecret),
+  requiredFields: ['googleRefreshToken (or Google Account connected)', 'googleClientId', 'googleClientSecret'],
+  check: (k) => !!((k.googleRefreshToken || k.googleAccessToken) && (k.googleClientId || process.env.GOOGLE_CLIENT_ID) && (k.googleClientSecret || process.env.GOOGLE_CLIENT_SECRET)),
 };
 
 const GOOGLE_GMAIL: CredentialRequirement = {
   label: 'Google Gmail OAuth',
   purpose: 'read real emails from Gmail inbox',
   configPath: 'Profile → Integrations → Connect Google Account',
-  requiredFields: ['googleRefreshToken', 'googleClientId'],
-  check: (k) => !!(k.googleRefreshToken && k.googleClientId),
+  requiredFields: ['googleRefreshToken (or Google Account connected)', 'googleClientId'],
+  check: (k) => !!((k.googleRefreshToken || k.googleAccessToken) && (k.googleClientId || process.env.GOOGLE_CLIENT_ID)),
 };
 
 const CRM_API: CredentialRequirement = {

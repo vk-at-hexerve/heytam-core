@@ -8,7 +8,14 @@ import twilio from 'twilio';
 import nodemailer from 'nodemailer';
 import type { TenantKeys } from '../schema.js';
 import { getTwilioClient } from './twilio-client.js';
-import { normalizePhone } from '../utils/phone-parser.js';
+import { normalizePhone, formatSpokenVoiceScript } from '../utils/phone-parser.js';
+import {
+  generateGatherTwiML,
+  generateElevenLabsAudioBuffer,
+  getPublicBackendUrl,
+  upsertCallSession,
+  type CallSession,
+} from '../engine/voice-session.js';
 
 export function createCommunicationTools(keys: TenantKeys) {
   const hasTwilioCreds = (keys.twilioAccountSid || keys.twilioApiKeySid) &&
@@ -77,18 +84,73 @@ export function createCommunicationTools(keys: TenantKeys) {
       inputSchema: z.object({
         to: z.string().describe('E.164 phone number to call.'),
         message: z.string().describe('Spoken message to deliver via Twilio TTS.'),
+        voice: z.string().optional().describe('ElevenLabs voice persona ID (e.g. 21m00Tcm4TlvDq8ikWAM).'),
       }),
-      execute: async ({ to, message }: { to: string; message: string }) => {
+      execute: async ({ to, message, voice }: { to: string; message: string; voice?: string }) => {
         if (!hasTwilioCreds)
           return { success: false, error: 'Twilio credentials not provided by tenant.' };
         try {
           const client = await getTwilioClient(keys);
           const cleanTo = normalizePhone(to) || to;
+          const sanitizedMessage = formatSpokenVoiceScript(message);
+          const selectedVoice = voice || keys.elevenLabsVoiceId || keys.twilioVoice || '21m00Tcm4TlvDq8ikWAM';
+          const publicBase = getPublicBackendUrl();
+          const turnUrl = `${publicBase}/api/voice/webhook/turn?voice=${encodeURIComponent(selectedVoice)}&direction=outbound`;
+          const statusUrl = `${publicBase}/api/voice/webhook/status`;
+
+          let audioUrl: string | null = null;
+          const useElevenLabs = keys.useElevenLabs || Boolean(keys.elevenLabsApiKey);
+          if (useElevenLabs && keys.elevenLabsApiKey) {
+            try {
+              const elAudio = await generateElevenLabsAudioBuffer({
+                text: sanitizedMessage,
+                voiceId: keys.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM',
+                apiKey: keys.elevenLabsApiKey,
+                modelId: keys.elevenLabsModel || 'eleven_turbo_v2_5',
+                stability: keys.elevenLabsStability,
+                similarityBoost: keys.elevenLabsSimilarity,
+              });
+              if (elAudio?.cacheId) {
+                audioUrl = `${publicBase}/api/voice/elevenlabs/audio/${elAudio.cacheId}.mp3`;
+              }
+            } catch {}
+          }
+
+          const conversationalTwiML = generateGatherTwiML({
+            speech: sanitizedMessage,
+            voice: selectedVoice,
+            turnUrl,
+            isEnding: false,
+            audioUrl,
+          });
+
           const call = await client.calls.create({
             to: cleanTo,
             from: keys.twilioFromPhone!,
-            twiml: `<Response><Say voice="Polly.Joanna">${message}</Say></Response>`,
+            twiml: conversationalTwiML,
+            statusCallback: statusUrl,
+            statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+            statusCallbackMethod: 'POST',
           });
+
+          // Register session
+          const session: CallSession = {
+            callSid: call.sid,
+            businessId: 'tool-caller',
+            from: keys.twilioFromPhone!,
+            to: cleanTo,
+            direction: 'outbound',
+            voice: selectedVoice,
+            status: 'in-progress',
+            startedAt: new Date().toISOString(),
+            turns: [{
+              role: 'ai',
+              text: message,
+              timestamp: new Date().toISOString(),
+              voice: selectedVoice,
+            }],
+          };
+          upsertCallSession(session);
 
           let latestStatus = String(call.status);
           for (let p = 0; p < 2; p++) {
@@ -102,7 +164,7 @@ export function createCommunicationTools(keys: TenantKeys) {
             }
           }
 
-          return { success: true, callSid: call.sid, status: latestStatus };
+          return { success: true, callSid: call.sid, status: latestStatus, voice: selectedVoice, interactive: true };
         } catch (err: unknown) {
           const msg = (err as Error).message;
           if (msg.includes('trial') || msg.includes('unverified')) {
