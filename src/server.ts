@@ -1803,12 +1803,122 @@ app.post('/api/tools/:businessId/oauth/connect-credentials', requireAuth, async 
 });
 
 // POST /api/tools/:businessId/oauth/disconnect
-app.post('/api/tools/:businessId/oauth/disconnect', requireAuth, (req: Request, res: Response) => {
+app.post('/api/tools/:businessId/oauth/disconnect', requireAuth, async (req: Request, res: Response) => {
   const businessId = (req as AuthenticatedRequest).businessId;
   const { provider } = req.body;
-  oauthConnectionsStore.delete(`${businessId}_${provider}`);
+  if (!provider) return res.status(400).json({ error: 'provider is required' });
+
+  const providersToDelete = [provider];
+  if (provider === 'google' || provider === 'google_calendar') {
+    providersToDelete.push('google', 'google_calendar');
+  }
+
+  // 1. Delete from in-memory oauthConnectionsStore
+  for (const p of providersToDelete) {
+    oauthConnectionsStore.delete(`${businessId}_${p}`);
+  }
+
+  // 2. Delete permanently from MongoDB Atlas
+  try {
+    const db = await getMongoDb();
+    if (db) {
+      await db.collection('oauth_connections').deleteMany({
+        businessId,
+        $or: [
+          { provider: { $in: providersToDelete } },
+          { _id: { $in: providersToDelete.map(p => `${businessId}_${p}` as any) } },
+          { key: { $in: providersToDelete.map(p => `${businessId}_${p}`) } },
+        ],
+      });
+    }
+  } catch (mongoErr: any) {
+    console.warn(`[Disconnect] Mongo delete error:`, mongoErr.message);
+  }
+
+  // 3. Clean up toolConfigStore for affected tools
+  if (provider === 'google' || provider === 'google_calendar') {
+    const googleTools = ['booking-agent', 'calendar-tool', 'follow-up-agent', 'lead-concierge', 'campaign-agent', 'review-agent', 'reactivation-agent', 'inbox-tool'];
+    for (const tid of googleTools) {
+      const cfg = toolConfigStore.get(`${businessId}_${tid}`);
+      if (cfg) {
+        delete cfg.googleAccessToken;
+        delete cfg.googleRefreshToken;
+        delete cfg.googleEmail;
+        delete cfg.oauthConnected;
+        delete cfg.oauthEmail;
+        toolConfigStore.set(`${businessId}_${tid}`, cfg);
+      }
+    }
+  } else if (provider === 'smtp') {
+    const smtpTools = ['follow-up-agent', 'campaign-agent', 'review-agent', 'reactivation-agent'];
+    for (const tid of smtpTools) {
+      const cfg = toolConfigStore.get(`${businessId}_${tid}`);
+      if (cfg) {
+        delete cfg.smtpHost;
+        delete cfg.smtpPort;
+        delete cfg.smtpUser;
+        delete cfg.smtpPass;
+        delete cfg.smtpFrom;
+        toolConfigStore.set(`${businessId}_${tid}`, cfg);
+      }
+    }
+  } else if (provider === 'twilio') {
+    const twilioTools = ['voice-agent', 'outbound-calling-agent', 'sms-concierge', 'whatsapp-concierge'];
+    for (const tid of twilioTools) {
+      const cfg = toolConfigStore.get(`${businessId}_${tid}`);
+      if (cfg) {
+        delete cfg.twilioAccountSid;
+        delete cfg.twilioAuthToken;
+        delete cfg.twilioApiKeySid;
+        delete cfg.twilioApiKeySecret;
+        delete cfg.twilioFromPhone;
+        toolConfigStore.set(`${businessId}_${tid}`, cfg);
+      }
+    }
+  } else if (provider === 'elevenlabs') {
+    const elTools = ['voice-agent', 'outbound-calling-agent'];
+    for (const tid of elTools) {
+      const cfg = toolConfigStore.get(`${businessId}_${tid}`);
+      if (cfg) {
+        delete cfg.elevenLabsApiKey;
+        toolConfigStore.set(`${businessId}_${tid}`, cfg);
+      }
+    }
+  } else if (provider === 'google_sheets') {
+    const sheetTools = ['lead-concierge', 'lead-qualifier', 'follow-up-agent', 'crm-agent', 'google_sheets'];
+    for (const tid of sheetTools) {
+      const cfg = toolConfigStore.get(`${businessId}_${tid}`);
+      if (cfg) {
+        delete cfg.googleSheetId;
+        delete cfg.googleSheetRange;
+        toolConfigStore.set(`${businessId}_${tid}`, cfg);
+      }
+    }
+  }
+
+  // 4. Update businessToolsStore statuses
+  const tools = businessToolsStore.get(businessId) || [];
+  for (const t of tools) {
+    const cfg = toolConfigStore.get(`${businessId}_${t.toolId}`) || {};
+    const isConfig = checkIsConfigured(cfg);
+    t.isConfigured = isConfig;
+    if (!isConfig) t.status = 'needs_setup';
+  }
+  businessToolsStore.set(businessId, tools);
+
+  // 5. Sync updated tool states to MongoDB
+  try {
+    const db = await getMongoDb();
+    if (db) {
+      await db.collection('business_tools').deleteMany({ businessId });
+      if (tools.length > 0) {
+        await db.collection('business_tools').insertMany(tools);
+      }
+    }
+  } catch {}
+
   savePersistentStores();
-  res.json({ success: true, message: `Disconnected ${provider}` });
+  res.json({ success: true, message: `Disconnected ${provider} and purged credentials from database.` });
 });
 
 // GET /api/businesses/:businessId/stats — dashboard counters
